@@ -94,12 +94,7 @@ func (n *node) Unicast(dest string, msg transport.Message) error {
 		Header: &header,
 		Msg: &msg,
 	}
-	err := n.config.Socket.Send(n.routingTable[dest], packet, 0)
-	if err != nil {
-		// TODO: log the error
-		return err
-	}
-	return nil
+	return n.config.Socket.Send(n.routingTable[dest], packet, 0)
 }
 
 // AddPeer implements peer.Service
@@ -139,7 +134,7 @@ func (n *node) SetRoutingEntry(origin, relayAddr string) {
 	n.routingTable[origin] = relayAddr
 }
 
-
+// ProcessPacket processes the pkt.
 func (n *node) ProcessPacket(pkt transport.Packet) error {
 	log.Info().Msgf(
 		"Receive packet from: %v, relay: %v, to: %v",
@@ -149,12 +144,15 @@ func (n *node) ProcessPacket(pkt transport.Packet) error {
 	return n.config.MessageRegistry.ProcessPacket(pkt)
 }
 
+// RelayPacket tries to relay the packet based on the routing table.
 func (n *node) RelayPacket(pkt transport.Packet) error {
 	n.routingTableMutex.RLock()
 	defer n.routingTableMutex.RUnlock()
+
 	if _, present := n.routingTable[pkt.Header.Destination]; !present {
 		return xerrors.Errorf("Cannot relay the message: from %v to %v", n.address, pkt.Header.Destination)
 	}
+
 	newPktHeader := transport.NewHeader(pkt.Header.Source, n.address, pkt.Header.Destination, pkt.Header.TTL - 1)
 	newPktMsg := pkt.Msg.Copy()
 	return n.config.Socket.Send(
@@ -166,11 +164,13 @@ func (n *node) RelayPacket(pkt transport.Packet) error {
 		0)
 }
 
+// ExecChatMessage TODO: check
 func ExecChatMessage(msg types.Message, pkt transport.Packet) error {
 	chatMsg, ok := msg.(*types.ChatMessage)
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
+
 	log.Info().Msgf("ExecChatMessage: receive chat message: %v", chatMsg)
 	return nil
 }
