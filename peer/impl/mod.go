@@ -26,7 +26,7 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 	// initialize routingTable
 	newNode.AddPeer(conf.Socket.GetAddress())
 	// Task 4: Implement a chat messaging mechanism
-	newNode.config.MessageRegistry.RegisterMessageCallback(types.ChatMessage{}, ExecChatMessage)
+	newNode.config.MessageRegistry.RegisterMessageCallback(types.ChatMessage{}, newNode.ExecChatMessage)
 	return newNode
 }
 
@@ -58,9 +58,9 @@ func (n *node) Start() error {
 					}
 
 					if pkt.Header.Destination == n.address {
-						err = n.ProcessPacket(pkt)
+						err = n.processPacket(pkt)
 					} else {
-						err = n.RelayPacket(pkt)
+						err = n.relayPacket(pkt)
 					}
 
 					if err != nil {
@@ -134,29 +134,40 @@ func (n *node) SetRoutingEntry(origin, relayAddr string) {
 	n.routingTable[origin] = relayAddr
 }
 
-// ProcessPacket processes the pkt.
-func (n *node) ProcessPacket(pkt transport.Packet) error {
+// processPacket processes the pkt.
+func (n *node) processPacket(pkt transport.Packet) error {
+	sourceAddress := pkt.Header.Source
+	relayAddress := pkt.Header.RelayedBy
+
+	n.updateRoutingTable(pkt)
+
 	log.Info().Msgf(
 		"Receive packet from: %v, relay: %v, to: %v",
-		pkt.Header.Source,
-		pkt.Header.RelayedBy,
+		sourceAddress,
+		relayAddress,
 		n.address)
+
 	return n.config.MessageRegistry.ProcessPacket(pkt)
 }
 
-// RelayPacket tries to relay the packet based on the routing table.
-func (n *node) RelayPacket(pkt transport.Packet) error {
+// relayPacket tries to relay the packet based on the routing table.
+func (n *node) relayPacket(pkt transport.Packet) error {
+	sourceAddress := pkt.Header.Source
+	destAddress := pkt.Header.Destination
+
+	n.updateRoutingTable(pkt)
+
 	n.routingTableMutex.RLock()
 	defer n.routingTableMutex.RUnlock()
 
-	if _, present := n.routingTable[pkt.Header.Destination]; !present {
-		return xerrors.Errorf("Cannot relay the message: from %v to %v", n.address, pkt.Header.Destination)
+	if _, present := n.routingTable[destAddress]; !present {
+		return xerrors.Errorf("Cannot relay the message: from %v to %v", n.address, destAddress)
 	}
 
-	newPktHeader := transport.NewHeader(pkt.Header.Source, n.address, pkt.Header.Destination, pkt.Header.TTL - 1)
+	newPktHeader := transport.NewHeader(sourceAddress, n.address, destAddress, pkt.Header.TTL - 1)
 	newPktMsg := pkt.Msg.Copy()
 	return n.config.Socket.Send(
-		n.routingTable[pkt.Header.Destination],
+		n.routingTable[destAddress],
 		transport.Packet{
 			Header: &newPktHeader,
 			Msg: &newPktMsg,
@@ -164,8 +175,19 @@ func (n *node) RelayPacket(pkt transport.Packet) error {
 		0)
 }
 
+func (n *node) updateRoutingTable(pkt transport.Packet){
+	n.routingTableMutex.Lock()
+	defer n.routingTableMutex.Unlock()
+	if _, present := n.routingTable[pkt.Header.Source]; !present {
+		n.routingTable[pkt.Header.Source] = pkt.Header.RelayedBy
+	}
+	if _, present := n.routingTable[pkt.Header.RelayedBy]; !present {
+		n.routingTable[pkt.Header.RelayedBy] = pkt.Header.RelayedBy
+	}
+}
+
 // ExecChatMessage TODO: check
-func ExecChatMessage(msg types.Message, pkt transport.Packet) error {
+func (n *node) ExecChatMessage(msg types.Message, pkt transport.Packet) error {
 	chatMsg, ok := msg.(*types.ChatMessage)
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
