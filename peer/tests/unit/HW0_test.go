@@ -616,5 +616,5 @@ func Test_HW0_Messaging_Unicast_Chat_Message(t *testing.T) {
 	}
 
 	t.Run("channel transport", getTest(channelFac()))
-	//t.Run("UDP transport", getTest(udpFac()))
+	t.Run("UDP transport", getTest(udpFac()))
 }
