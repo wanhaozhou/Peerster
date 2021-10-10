@@ -531,6 +531,7 @@ func Test_HW0_Messaging_Relaying(t *testing.T) {
 
 			// > n2 should have received only 1 fake packet
 
+
 			require.Len(t, n2Ins, 1)
 			pkt = n2Ins[0]
 
@@ -574,6 +575,109 @@ func Test_HW0_Messaging_Relaying(t *testing.T) {
 			// > the handler should've been called
 
 			status.CheckCalled(t)
+		}
+	}
+
+	t.Run("channel transport", getTest(channelFac()))
+	t.Run("UDP transport", getTest(udpFac()))
+}
+
+
+func Test_HW0_Messaging_Unicast_Chat_Message(t *testing.T) {
+	// test case with a provided transport
+	getTest := func(transp transport.Transport) func(*testing.T) {
+		return func(t *testing.T) {
+			t.Parallel()
+
+			node1 := z.NewTestNode(t, peerFac, transp, "127.0.0.1:0")
+			defer node1.Stop()
+
+			node2 := z.NewTestNode(t, peerFac, transp, "127.0.0.1:0")
+			defer node2.Stop()
+
+			node1.AddPeer(node2.GetAddr())
+
+			chat := types.ChatMessage{
+				Message: "this is my chat message",
+			}
+			data, err := json.Marshal(&chat)
+			require.NoError(t, err)
+
+			msg := transport.Message{
+				Type:    chat.Name(),
+				Payload: data,
+			}
+
+			err = node1.Unicast(node2.GetAddr(), msg)
+			require.NoError(t, err)
+
+			time.Sleep(time.Second)
+
+			n1Ins := node1.GetIns()
+			n2Ins := node2.GetIns()
+
+			require.Len(t, n1Ins, 0)
+			require.Len(t, n2Ins, 1)
+		}
+	}
+
+	t.Run("channel transport", getTest(channelFac()))
+	t.Run("UDP transport", getTest(udpFac()))
+}
+
+func Test_HW0_Routing_Table(t *testing.T) {
+	// test case with a provided transport
+	getTest := func(transp transport.Transport) func(*testing.T) {
+		return func(t *testing.T) {
+			t.Parallel()
+
+			node1 := z.NewTestNode(t, peerFac, transp, "127.0.0.1:0")
+			defer node1.Stop()
+
+			node2 := z.NewTestNode(t, peerFac, transp, "127.0.0.1:0")
+			defer node2.Stop()
+
+			node3 := z.NewTestNode(t, peerFac, transp, "127.0.0.1:0")
+			defer node3.Stop()
+
+			node1.AddPeer(node2.GetAddr())
+			node2.AddPeer(node3.GetAddr())
+			node1.SetRoutingEntry(node3.GetAddr(), node2.GetAddr())
+
+			chat := types.ChatMessage{
+				Message: "this is my chat message",
+			}
+			data, err := json.Marshal(&chat)
+			require.NoError(t, err)
+
+			msg := transport.Message{
+				Type:    chat.Name(),
+				Payload: data,
+			}
+
+			// test 1
+			err = node3.Unicast(node2.GetAddr(), msg)
+			require.Error(t, err)
+
+			err = node2.Unicast(node3.GetAddr(), msg)
+			require.NoError(t, err)
+
+			time.Sleep(time.Second * 2)
+
+			err = node3.Unicast(node2.GetAddr(), msg)
+			require.NoError(t, err)
+
+			// test 2
+			err = node3.Unicast(node1.GetAddr(), msg)
+			require.Error(t, err)
+
+			err = node1.Unicast(node3.GetAddr(), msg)
+			require.NoError(t, err)
+
+			time.Sleep(time.Second * 2)
+
+			err = node3.Unicast(node1.GetAddr(), msg)
+			require.NoError(t, err)
 		}
 	}
 
