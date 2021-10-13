@@ -22,11 +22,9 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 		config: conf,
 		address: conf.Socket.GetAddress(),
 		stop: make(chan bool),
-		routingTable: make(map[string]string),
-		sequence: atomicUint{},
-		neighbourTable: neighbourTable{values: make(map[string]int)},
-		view: view{values: make(map[string]uint)},
-		ackRumors: ackRumors{values: make(map[string][]types.Rumor)},
+		routingTable: routingTable{values:make(map[string]string)},
+		neighbourTable: neighbourTable{values: make(map[string]bool)},
+		ackRumors: ackRumors{ values: make(map[string][]types.Rumor)},
 		ackChanMap: ackChanMap{values: make(map[string]chan bool)},
 	}
 
@@ -46,6 +44,7 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 	newNode.config.MessageRegistry.RegisterMessageCallback(types.AckMessage{}, newNode.ExecAckMessage)
 	newNode.config.MessageRegistry.RegisterMessageCallback(types.EmptyMessage{}, newNode.ExecEmptyMessage)
 	newNode.config.MessageRegistry.RegisterMessageCallback(types.StatusMessage{}, newNode.ExecStatusMessage)
+	newNode.config.MessageRegistry.RegisterMessageCallback(types.PrivateMessage{}, newNode.ExecPrivateMessage)
 	return newNode
 }
 
@@ -54,15 +53,12 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 // - implements peer.Peer
 type node struct {
 	peer.Peer
-	routingTableMutex sync.RWMutex
 
 	config peer.Configuration
 	address string
 	stop chan bool
-	routingTable peer.RoutingTable
-	sequence atomicUint
+	routingTable routingTable
 	neighbourTable neighbourTable
-	view view
 	ackRumors ackRumors
 	antiEntropyTicker *time.Ticker
 	heartbeatTicker *time.Ticker
@@ -101,11 +97,11 @@ func (n *node) Start() error {
 	go func() {
 		for n.antiEntropyTicker != nil {
 			select {
-			case <- n.stop:
-				n.antiEntropyTicker.Stop()
-				return
-			case <- n.antiEntropyTicker.C:
-				n.antiEntropy()
+				case <- n.stop:
+					n.antiEntropyTicker.Stop()
+					return
+				case <- n.antiEntropyTicker.C:
+					n.antiEntropy()
 			}
 		}
 	}()
@@ -114,11 +110,11 @@ func (n *node) Start() error {
 	go func() {
 		for n.heartbeatTicker != nil {
 			select {
-			case <- n.stop:
-				n.heartbeatTicker.Stop()
-				return
-			case <- n.heartbeatTicker.C:
-				n.heartbeat()
+				case <- n.stop:
+					n.heartbeatTicker.Stop()
+					return
+				case <- n.heartbeatTicker.C:
+					n.heartbeat()
 			}
 		}
 	}()
@@ -135,45 +131,43 @@ func (n *node) Stop() error {
 // Unicast implements peer.Messaging
 func (n *node) Unicast(dest string, msg transport.Message) error {
 	// find if the dst is in the routing table
-	n.routingTableMutex.RLock()
-	defer n.routingTableMutex.RUnlock()
+	n.routingTable.RLock()
+	defer n.routingTable.RUnlock()
 
-	if _, present := n.routingTable[dest]; !present {
-		return xerrors.Errorf("Cannot find destination: %v", dest)
+	if _, present := n.routingTable.values[dest]; !present {
+		return xerrors.Errorf("[%v] Cannot find destination: %v", n.address, dest)
 	}
 
-	// TODO: check the relay address
 	header := transport.NewHeader(n.address, n.address, dest, 0)
 	packet := transport.Packet{
 		Header: &header,
 		Msg: &msg,
 	}
-	return n.config.Socket.Send(n.routingTable[dest], packet, 0)
+	return n.config.Socket.Send(n.routingTable.values[dest], packet, 0)
 }
 
 // AddPeer implements peer.Service
 func (n *node) AddPeer(addrs ...string) {
-	n.routingTableMutex.Lock()
+	n.routingTable.Lock()
 	n.neighbourTable.Lock()
 	defer n.neighbourTable.Unlock()
-	defer n.routingTableMutex.Unlock()
+	defer n.routingTable.Unlock()
 
 	for _, addr := range addrs {
-		n.routingTable[addr] = addr
-		// add this peer to the neighbour table
-		if _, present := n.neighbourTable.values[addr]; !present && addr != n.address {
-			n.neighbourTable.values[addr] = 1
+		n.routingTable.values[addr] = addr
+		if addr != n.address {
+			n.neighbourTable.values[addr] = true
 		}
 	}
 }
 
 // GetRoutingTable implements peer.Service
 func (n *node) GetRoutingTable() peer.RoutingTable {
-	n.routingTableMutex.RLock()
-	defer n.routingTableMutex.RUnlock()
+	n.routingTable.RLock()
+	defer n.routingTable.RUnlock()
 
 	table := make(map[string]string)
-	for k, v := range n.routingTable {
+	for k, v := range n.routingTable.values {
 		table[k] = v
 	}
 	return table
@@ -181,40 +175,32 @@ func (n *node) GetRoutingTable() peer.RoutingTable {
 
 // SetRoutingEntry implements peer.Service
 func (n *node) SetRoutingEntry(origin, relayAddr string) {
-	n.routingTableMutex.Lock()
+	n.routingTable.Lock()
 	n.neighbourTable.Lock()
 	defer n.neighbourTable.Unlock()
-	defer n.routingTableMutex.Unlock()
+	defer n.routingTable.Unlock()
 	log.Info().Msgf("[%v] Setting routing entry: origin=%v, relayAddr=%v", n.address, origin, relayAddr)
 
 	if len(relayAddr) == 0 {
 		// TODO: potentially lose a neighbour
-		if relay, presentInRouting := n.routingTable[origin]; presentInRouting {
-			_, presentInNeighbour := n.neighbourTable.values[relay]
-			if presentInNeighbour {
-				n.neighbourTable.values[relay]--
-				if n.neighbourTable.values[relay] == 0 {
-					delete(n.neighbourTable.values, relay)
-				}
-			}
-			delete(n.routingTable, origin)
-		}
+		log.Error().Msgf("[%v] Losing neighbour", n.address)
+		delete(n.routingTable.values, origin)
 		return
 	}
 
 	// TODO: add a new neighbour
-	n.routingTable[origin] = relayAddr
-	n.neighbourTable.values[relayAddr]++
+	n.routingTable.values[origin] = relayAddr
+	n.neighbourTable.values[relayAddr] = true
 }
 
 func (n *node) Broadcast(msg transport.Message) error {
 	// send it to a random neighbour
 	neighbour, _ := n.getRandomNeighbour()
-	return n.broadCast(msg, neighbour, true)
+	return n.broadCast(msg, neighbour, true, true)
 }
 
 
-// ExecChatMessage TODO: check
+// ExecChatMessage implements the handler for types.ChatMessage
 func (n *node) ExecChatMessage(msg types.Message, _ transport.Packet) error {
 	chatMsg, ok := msg.(*types.ChatMessage)
 	if !ok {
@@ -224,24 +210,43 @@ func (n *node) ExecChatMessage(msg types.Message, _ transport.Packet) error {
 	return nil
 }
 
-// ExecEmptyMessage TODO: check
-func (n *node) ExecEmptyMessage(msg types.Message, _ transport.Packet) error {
-	emptyMsg, ok := msg.(*types.EmptyMessage)
+// ExecPrivateMessage implements the handler for types.PrivateMessage
+func (n *node) ExecPrivateMessage(msg types.Message, pkt transport.Packet) error {
+	privateMsg, ok := msg.(*types.PrivateMessage)
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecEmptyMessage: receive empty message: %v", n.address, emptyMsg)
+	var err error
+	if _, present := privateMsg.Recipients[n.address]; present {
+		log.Info().Msgf("[%v] ExecPrivateMessage: receive private message: %v", n.address, privateMsg)
+		err = n.config.MessageRegistry.ProcessPacket(transport.Packet{
+			Header: pkt.Header,
+			Msg:    privateMsg.Msg,
+		})
+	}
+	return err
+}
+
+// ExecEmptyMessage implements the handler for types.EmptyMessage
+func (n *node) ExecEmptyMessage(msg types.Message, _ transport.Packet) error {
+	_, ok := msg.(*types.EmptyMessage)
+	if !ok {
+		return xerrors.Errorf("Wrong type: %T", msg)
+	}
+	log.Info().Msgf("[%v] ExecEmptyMessage: receive empty message", n.address)
 	return nil
 }
 
-// ExecAckMessage TODO: check
+// ExecAckMessage implements the handler for types.AckMessage
 func (n *node) ExecAckMessage(msg types.Message, pkt transport.Packet) error {
 	ackMsg, ok := msg.(*types.AckMessage)
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
+	log.Info().Msgf("[%v] ExecAckMessage And Check Neighbour: receive ACK message from: %v, on pkt: %v", n.address, pkt.Header.Source, ackMsg.AckedPacketID)
 
-	log.Info().Msgf("[%v] ExecAckMessage: receive ACK message from: %v, on pkt: %v", n.address, pkt.Header.Source, ackMsg.AckedPacketID)
+	n.checkNeighbour(pkt.Header.Source)
+
 	n.ackChanMap.RLock()
 	ackChan := n.ackChanMap.values[ackMsg.AckedPacketID]
 	n.ackChanMap.RUnlock()
@@ -249,12 +254,14 @@ func (n *node) ExecAckMessage(msg types.Message, pkt transport.Packet) error {
 		go func() {
 			select {
 				case ackChan <- true:
-					log.Info().Msgf("[%v] Syncing ACK for packet %v successful", n.address, ackMsg.AckedPacketID)
+					log.Info().Msgf("[%v] Sending ACK for packet %v successful to channel", n.address, ackMsg.AckedPacketID)
 				case <-time.After(time.Second):
-						log.Info().Msgf("[%v] Timeout syncing ACK for packet %v", n.address, ackMsg.AckedPacketID)
+					log.Info().Msgf("[%v] Timeout syncing ACK for packet %v", n.address, ackMsg.AckedPacketID)
 			}
 		}()
 	}
+
+	log.Info().Msgf("[%v] Start to process status message in ACK", n.address)
 	// proceed to process the embedded status message
 	message, err := n.config.MessageRegistry.MarshalMessage(ackMsg.Status)
 	if err != nil {
@@ -266,19 +273,30 @@ func (n *node) ExecAckMessage(msg types.Message, pkt transport.Packet) error {
 	})
 }
 
-// ExecRumorsMessage TODO: check
+// ExecRumorsMessage implements the handler for types.RumorsMessage
 func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error {
 	rumorMsg, ok := msg.(*types.RumorsMessage)
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecRumorsMessage: receives rumors message: %v, from: %v", n.address, rumorMsg, pkt.Header.Source)
+	log.Info().Msgf("[%v] ExecRumorsMessage And Check Neighbour: receives rumors message: %v, from: %v, relayed by: %v",
+		n.address,
+		rumorMsg,
+		pkt.Header.Source,
+		pkt.Header.RelayedBy,
+	)
+
+	n.checkNeighbour(pkt.Header.Source)
 
 	if pkt.Header.Source == n.address {
 		// this is a local message from the current node
 		// should not happen
 		log.Error().Msgf("[%v] Process a local rumor message %v", n.address, rumorMsg)
 		return nil
+	}
+
+	if pkt.Header.Source != pkt.Header.RelayedBy {
+		log.Error().Msgf("!!! Should Not Happen !!! ", pkt.Header.Source, pkt.Header.RelayedBy)
 	}
 
 	// process each rumor and update routing table
@@ -291,7 +309,7 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 	log.Info().Msgf("[%v] Sending ACK to %v", n.address, pkt.Header.Source)
 	ackMsg := types.AckMessage{
 		AckedPacketID: pkt.Header.PacketID,
-		Status: n.view.getValues(),
+		Status: n.getStatusMessage(),
 	}
 	n.sendMessageUnchecked(pkt.Header.Source, ackMsg)
 	log.Info().Msgf("[%v] Sent ACK to %v", n.address, pkt.Header.Source)
@@ -300,35 +318,27 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 		// choose a random neighbour to broadcast
 		neighbour, err := n.getRandomNeighbourExclude(pkt.Header.RelayedBy)
 		if err != nil {
-			// we cannot find another neighbour to send the rumor
-			// simply abort the action
+			// we cannot find another neighbour to send the rumor, so simply abort the action
 			log.Info().Err(err)
 			return nil
 		}
 
-		log.Info().Msgf("[%v] Sending the rumor to: %v", n.address, neighbour)
-		pktHeader := transport.NewHeader(n.address, n.address, neighbour, pkt.Header.TTL - 1)
-		pktMsg, err := n.config.MessageRegistry.MarshalMessage(rumorMsg)
-		if err != nil {
-			return err
-		}
-		pktForward := transport.Packet{
-			Header: &pktHeader,
-			Msg: &pktMsg,
-		}
-		return n.config.Socket.Send(neighbour, pktForward, 0)
+		log.Info().Msgf("[%v] Message is expected. Broadcasting the rumor to: %v", n.address, neighbour)
+		n.sendMessageUnchecked(neighbour, rumorMsg)
 	}
 
 	return nil
 }
 
-// ExecStatusMessage TODO:
+// ExecStatusMessage implements the handler for types.StatusMessage
 func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error {
 	statusMsg, ok := msg.(*types.StatusMessage)
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecStatusMessage: receive status message from: %v, content: %v", n.address, pkt.Header.Source, statusMsg)
+	log.Info().Msgf("[%v] ExecStatusMessage And Check Neighbour: receive status message from: %v, content: %v", n.address, pkt.Header.Source, statusMsg)
+
+	n.checkNeighbour(pkt.Header.Source)
 
 	myStatus := n.getStatusMessage()
 	peerStatus := *statusMsg
@@ -337,6 +347,8 @@ func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error 
 	// check if remote peer has more messages
 	for k, v := range peerStatus {
 		if myStatus[k] < v {
+			log.Info().Msgf("[%v] Is missing information, syncing with: %v", n.address, pkt.Header.Source)
+			log.Info().Msgf("[%v] local status: %v, remote %v 's status: %v", n.address, myStatus, pkt.Header.Source, peerStatus)
 			n.sendMessageUnchecked(pkt.Header.Source, myStatus)
 			inSync = false
 			break
@@ -344,7 +356,6 @@ func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error 
 	}
 
 	var rumors []types.Rumor
-
 	// check if I have more messages
 	for k, v := range myStatus {
 		if peerStatus[k] < v {
@@ -378,17 +389,34 @@ func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error 
 }
 
 
-func (n *node) broadCast(msg transport.Message, neighbour string, ack bool) error {
+func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, process bool) error {
 	// create a rumor message
 	n.ackRumors.Lock()
+
+	// process the message locally
+	if process {
+		header := transport.NewHeader(n.address, n.address, n.address, 0)
+		pkt := transport.Packet{
+			Header: &header,
+			Msg: &msg,
+		}
+		err := n.config.MessageRegistry.ProcessPacket(pkt)
+		if err != nil {
+			log.Error().Err(err)
+		}
+	}
+
+	currentSequence := uint(len(n.ackRumors.values[n.address]) + 1)
 	rumor := types.Rumor{
 		Origin: n.address,
-		Sequence: n.sequence.incrementAndGet(),
+		Sequence: currentSequence,
 		Msg: &msg,
 	}
 	rumorMsg := types.RumorsMessage{
 		Rumors: []types.Rumor{rumor},
 	}
+
+	// update
 	n.ackRumors.values[n.address] = append(n.ackRumors.values[n.address], rumor)
 	n.ackRumors.Unlock()
 
@@ -398,12 +426,11 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool) erro
 		return nil
 	}
 
-	// marshal the message
+	// send the message
 	transportMsg, err := n.config.MessageRegistry.MarshalMessage(rumorMsg)
 	if err != nil {
 		return err
 	}
-
 	header := transport.NewHeader(n.address, n.address, neighbour, 0)
 	pkt := transport.Packet{
 		Header: &header,
@@ -413,7 +440,10 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool) erro
 	if err != nil {
 		return err
 	}
+	log.Info().Msgf("[%v] Initiate a rumor to %v, packet id: %v, requires ack: %v, process locally: %v", n.address, neighbour, pkt.Header.PacketID, ack, process)
 
+
+	// wait for ack
 	if ack && n.config.AckTimeout > 0 {
 		ackTicker := time.NewTicker(n.config.AckTimeout)
 		id := pkt.Header.PacketID
@@ -424,40 +454,46 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool) erro
 			n.ackChanMap.Unlock()
 			for {
 				select {
-				case <- ackTicker.C:
-					log.Info().Msgf("[%v] Timeout receiving ACK for packet %v", n.address, id)
-					nextNeighbour, _ := n.getRandomNeighbourExclude(neighbour)
-					if len(nextNeighbour) > 0 {
-						broadCastErr := n.broadCast(msg, nextNeighbour, false)
-						if broadCastErr != nil {
-							log.Error().Err(broadCastErr)
+					case <- ackTicker.C:
+						log.Info().Msgf("[%v] Timeout receiving ACK for packet %v", n.address, id)
+						nextNeighbour, _ := n.getRandomNeighbourExclude(neighbour)
+						if len(nextNeighbour) > 0 {
+							// find the rumor in history
+							n.ackRumors.RLock()
+							resendRumor := n.ackRumors.values[n.address][currentSequence-1]
+							n.ackRumors.RUnlock()
+							n.sendMessageUnchecked(nextNeighbour, types.RumorsMessage{
+								Rumors: []types.Rumor{resendRumor},
+							})
 						}
-					}
-					return
-				case <- ackChan:
-					return
+						// TODO: check
+						n.ackChanMap.Lock()
+						delete(n.ackChanMap.values, id)
+						n.ackChanMap.Unlock()
+						return
+					case <- ackChan:
+						log.Info().Msgf("[%v] Receiving ACK for packet %v successful on channel", n.address, id)
+
+						// TODO: check
+						n.ackChanMap.Lock()
+						delete(n.ackChanMap.values, id)
+						n.ackChanMap.Unlock()
+						return
 				}
 			}
 		}()
 	}
 
-	// process the message locally
-	header = transport.NewHeader(n.address, n.address, n.address, 0)
-	pkt = transport.Packet{
-		Header: &header,
-		Msg: &msg,
-	}
-	err = n.config.MessageRegistry.ProcessPacket(pkt)
 	return err
 }
 
 // processPacket processes the pkt.
 func (n *node) processPacket(pkt transport.Packet) error {
 	log.Info().Msgf(
-		"[%v] Receive packet: id: %v, type: %v, from: %v, relay: %v, to: %v",
+		"[%v] Socket receives [%v] packet, id: %v, from: %v, relay: %v, to: %v",
 		n.address,
-		pkt.Header.PacketID,
 		pkt.Msg.Type,
+		pkt.Header.PacketID,
 		pkt.Header.Source,
 		pkt.Header.RelayedBy,
 		pkt.Header.Destination)
@@ -471,17 +507,17 @@ func (n *node) relayPacket(pkt transport.Packet) error {
 	sourceAddress := pkt.Header.Source
 	destAddress := pkt.Header.Destination
 
-	n.routingTableMutex.RLock()
-	defer n.routingTableMutex.RUnlock()
+	n.routingTable.RLock()
+	defer n.routingTable.RUnlock()
 
-	if _, present := n.routingTable[destAddress]; !present {
+	if _, present := n.routingTable.values[destAddress]; !present {
 		return xerrors.Errorf("Cannot relay the message: from %v to %v", n.address, destAddress)
 	}
 
 	newPktHeader := transport.NewHeader(sourceAddress, n.address, destAddress, pkt.Header.TTL - 1)
 	newPktMsg := pkt.Msg.Copy()
 	return n.config.Socket.Send(
-		n.routingTable[destAddress],
+		n.routingTable.values[destAddress],
 		transport.Packet{
 			Header: &newPktHeader,
 			Msg: &newPktMsg,
@@ -505,31 +541,31 @@ func (n *node) sendMessageUnchecked(dest string, message types.Message) {
 		log.Error().Err(err)
 		return
 	}
-	log.Info().Msgf("[%v] Sent %v message to dest %v, content: %v", n.address, message.Name(), dest, message)
+	log.Info().Msgf("[%v] Send Message Unchecked: type: %v, to: %v, content: %v", n.address, message.Name(), dest, message)
 }
 
 func (n *node) handleSingleRumor(rumor types.Rumor, pkt transport.Packet) bool {
-	err := n.handleMessageInRumor(rumor.Msg, pkt)
-	if err != nil {
-		log.Error().Err(err)
-		return false
-	}
 
 	if rumor.Origin == n.address {
-		log.Info().Msgf("[%v] rumor %v, packet id: %v, from %v, relay %v, to %v", n.address, rumor, pkt.Header.PacketID, pkt.Header.Source, pkt.Header.RelayedBy, pkt.Header.Destination)
+		log.Info().Msgf("[%v] Received rumor created by me! " +
+			"Content: %v, packet id: %v, from %v, relay %v, to %v",
+			n.address,
+			rumor,
+			pkt.Header.PacketID,
+			pkt.Header.Source,
+			pkt.Header.RelayedBy,
+			pkt.Header.Destination,
+		)
 	}
 
-	n.view.Lock()
 	n.ackRumors.Lock()
 	defer n.ackRumors.Unlock()
-	defer n.view.Unlock()
 
 	expected := false
 	rumorSource := rumor.Origin
 	rumorSeq := rumor.Sequence
-	if rumorSeq == n.view.values[rumorSource] + 1 {
+	if rumorSeq == uint(len(n.ackRumors.values[rumorSource]) + 1) {
 		expected = true
-		n.view.values[rumorSource]++
 		rumorMsgCopy := rumor.Msg.Copy()
 		n.ackRumors.values[rumorSource] = append(n.ackRumors.values[rumorSource], types.Rumor{
 			Origin: rumorSource,
@@ -537,6 +573,7 @@ func (n *node) handleSingleRumor(rumor types.Rumor, pkt transport.Packet) bool {
 			Msg: &rumorMsgCopy,
 		})
 		n.SetRoutingEntry(rumorSource, pkt.Header.RelayedBy)
+		log.Error().Err(n.handleMessageInRumor(rumor.Msg, pkt))
 	}
 	return expected
 }
@@ -546,7 +583,66 @@ func (n *node) handleMessageInRumor(msg *transport.Message, pkt transport.Packet
 		Header: pkt.Header,
 		Msg: msg,
 	}
+	log.Info().Msgf("[%v] Process message in rumor", n.address)
 	return n.config.MessageRegistry.ProcessPacket(newPkt)
+}
+
+func (n *node) antiEntropy() {
+	neighbour, err := n.getRandomNeighbour()
+	if err != nil {
+		log.Info().Err(err)
+		return
+	}
+
+	log.Info().Msgf("[%v] Anti-entropy message to %v", n.address, neighbour)
+	n.sendMessageUnchecked(neighbour, n.getStatusMessage())
+}
+
+func (n *node) heartbeat() {
+	emptyMessage := types.EmptyMessage{}
+	message, err := n.config.MessageRegistry.MarshalMessage(emptyMessage)
+	if err != nil {
+		log.Info().Err(err)
+		return
+	}
+	neighbour, err:= n.getRandomNeighbour()
+	if err != nil {
+		log.Info().Err(err)
+		return
+	}
+
+	log.Info().Msgf("[%v] Heartbeat message", n.address)
+	err = n.broadCast(message, neighbour, false, false)
+	if err != nil {
+		log.Info().Err(err)
+	}
+}
+
+func (n *node) checkNeighbour(neighbour string) {
+	if len(neighbour) > 0 && neighbour != n.address {
+		n.neighbourTable.Lock()
+		defer n.neighbourTable.Unlock()
+		if !n.neighbourTable.values[neighbour] {
+			log.Info().Msgf("[%v] Is missing neighbour %v", n.address, neighbour)
+			n.neighbourTable.values[neighbour] = true
+		}
+	}
+}
+
+func (n *node) getStatusMessage() types.StatusMessage {
+	n.ackRumors.RLock()
+	defer n.ackRumors.RUnlock()
+	status := make(map[string]uint)
+	for k, v := range n.ackRumors.values {
+		status[k] = uint(len(v))
+	}
+	return status
+}
+
+// neighbourTable
+type neighbourTable struct {
+	sync.RWMutex
+	values map[string]bool
 }
 
 func (n *node) getRandomNeighbour() (string, error) {
@@ -576,100 +672,15 @@ func (n *node) getRandomNeighbourExclude(exclude string) (string, error) {
 	return "", err
 }
 
-func (n *node) antiEntropy() {
-	neighbour, err := n.getRandomNeighbour()
-	if err != nil {
-		log.Info().Err(err)
-		return
-	}
-
-	status := n.getStatusMessage()
-	message, err := n.config.MessageRegistry.MarshalMessage(status)
-	if err != nil {
-		log.Info().Err(err)
-		return
-	}
-
-	err = n.Unicast(neighbour, message)
-	if err != nil {
-		log.Info().Err(err)
-	}
-}
-
-func (n *node) heartbeat() {
-	emptyMessage := types.EmptyMessage{}
-	message, err := n.config.MessageRegistry.MarshalMessage(emptyMessage)
-	log.Info().Msgf("Heartbeat from: %v", n.address)
-	if err != nil {
-		log.Info().Err(err)
-		return
-	}
-	neighbour, err:= n.getRandomNeighbour()
-	if err != nil {
-		log.Info().Err(err)
-		return
-	}
-
-	err = n.broadCast(message, neighbour, false)
-	if err != nil {
-		log.Info().Err(err)
-	}
-}
-
-func (n *node) getStatusMessage() types.StatusMessage {
-	status := n.view.getValues()
-	seq := n.sequence.get()
-	if seq > 0 {
-		status[n.address] = seq
-	}
-	return status
-}
-
-// atomicUint
-type atomicUint struct {
-	sync.RWMutex
-	num uint
-}
-
-func (a *atomicUint) incrementAndGet() uint {
-	a.Lock()
-	defer a.Unlock()
-	a.num++
-	return a.num
-}
-
-func (a *atomicUint) get() uint {
-	a.RLock()
-	defer a.RUnlock()
-	return a.num
-}
-
-// neighbourTable
-type neighbourTable struct {
-	sync.RWMutex
-	values map[string]int
-}
-
 // view
-type view struct {
-	sync.RWMutex
-	values map[string]uint
-}
-
-func (v *view) getValues() map[string]uint {
-	v.RLock()
-	defer v.RUnlock()
-	status := make(map[string]uint)
-	for k, vv := range v.values {
-		status[k] = vv
-	}
-	return status
-}
-
-// ackRumors
 type ackRumors struct {
 	sync.RWMutex
 	values map[string][]types.Rumor
+}
+
+type routingTable struct {
+	sync.RWMutex
+	values map[string]string
 }
 
 type ackChanMap struct {
