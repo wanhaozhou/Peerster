@@ -2,15 +2,57 @@ package impl
 
 import (
 	"errors"
-	"github.com/rs/zerolog/log"
+	"github.com/rs/zerolog"
 	"go.dedis.ch/cs438/peer"
 	"go.dedis.ch/cs438/transport"
 	"go.dedis.ch/cs438/types"
 	"golang.org/x/xerrors"
 	"math/rand"
+	"os"
 	"sync"
 	"time"
 )
+
+// Improve logging
+// Snippet taken from: https://github.com/dedis/dela/blob/6aaa2373492e8b5740c0a1eb88cf2bc7aa331ac0/mod.go#L59
+
+const EnvLogLevel = ""
+const defaultLevel = zerolog.DebugLevel
+
+func init() {
+	lvl := os.Getenv(EnvLogLevel)
+
+	var level zerolog.Level
+
+	switch lvl {
+	case "error":
+		level = zerolog.ErrorLevel
+	case "warn":
+		level = zerolog.WarnLevel
+	case "info":
+		level = zerolog.InfoLevel
+	case "debug":
+		level = zerolog.DebugLevel
+	case "trace":
+		level = zerolog.TraceLevel
+	case "":
+		level = defaultLevel
+	default:
+		level = zerolog.TraceLevel
+	}
+	Logger = Logger.Level(level)
+}
+
+var logout = zerolog.ConsoleWriter{
+	Out:        os.Stdout,
+	TimeFormat: time.RFC3339,
+}
+
+// Logger is a globally available logger instance. By default, it only prints
+// error level messages but it can be changed through a environment variable.
+var Logger = zerolog.New(logout).Level(defaultLevel).
+	With().Timestamp().Logger().
+	With().Caller().Logger()
 
 
 // NewPeer creates a new peer. You can change the content and location of this
@@ -87,7 +129,7 @@ func (n *node) Start() error {
 					}
 
 					if err != nil {
-						log.Error().Err(err)
+						Logger.Error().Err(err)
 					}
 			}
 		}
@@ -179,11 +221,11 @@ func (n *node) SetRoutingEntry(origin, relayAddr string) {
 	n.neighbourTable.Lock()
 	defer n.neighbourTable.Unlock()
 	defer n.routingTable.Unlock()
-	log.Info().Msgf("[%v] Setting routing entry: origin=%v, relayAddr=%v", n.address, origin, relayAddr)
+	Logger.Info().Msgf("[%v] Setting routing entry: origin=%v, relayAddr=%v", n.address, origin, relayAddr)
 
 	if len(relayAddr) == 0 {
 		// TODO: potentially lose a neighbour
-		log.Error().Msgf("[%v] Losing neighbour", n.address)
+		Logger.Error().Msgf("[%v] Losing neighbour", n.address)
 		delete(n.routingTable.values, origin)
 		return
 	}
@@ -206,7 +248,7 @@ func (n *node) ExecChatMessage(msg types.Message, _ transport.Packet) error {
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecChatMessage: receive chat message: %v", n.address, chatMsg)
+	Logger.Info().Msgf("[%v] ExecChatMessage: receive chat message: %v", n.address, chatMsg)
 	return nil
 }
 
@@ -218,7 +260,7 @@ func (n *node) ExecPrivateMessage(msg types.Message, pkt transport.Packet) error
 	}
 	var err error
 	if _, present := privateMsg.Recipients[n.address]; present {
-		log.Info().Msgf("[%v] ExecPrivateMessage: receive private message: %v", n.address, privateMsg)
+		Logger.Info().Msgf("[%v] ExecPrivateMessage: receive private message: %v", n.address, privateMsg)
 		err = n.config.MessageRegistry.ProcessPacket(transport.Packet{
 			Header: pkt.Header,
 			Msg:    privateMsg.Msg,
@@ -233,7 +275,7 @@ func (n *node) ExecEmptyMessage(msg types.Message, _ transport.Packet) error {
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecEmptyMessage: receive empty message", n.address)
+	Logger.Info().Msgf("[%v] ExecEmptyMessage: receive empty message", n.address)
 	return nil
 }
 
@@ -243,7 +285,7 @@ func (n *node) ExecAckMessage(msg types.Message, pkt transport.Packet) error {
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecAckMessage And Check Neighbour: receive ACK message from: %v, on pkt: %v", n.address, pkt.Header.Source, ackMsg.AckedPacketID)
+	Logger.Info().Msgf("[%v] ExecAckMessage And Check Neighbour: receive ACK message from: %v, on pkt: %v", n.address, pkt.Header.Source, ackMsg.AckedPacketID)
 
 	n.checkNeighbour(pkt.Header.Source)
 
@@ -254,14 +296,14 @@ func (n *node) ExecAckMessage(msg types.Message, pkt transport.Packet) error {
 		go func() {
 			select {
 				case ackChan <- true:
-					log.Info().Msgf("[%v] Sending ACK for packet %v successful to channel", n.address, ackMsg.AckedPacketID)
+					Logger.Info().Msgf("[%v] Sending ACK for packet %v successful to channel", n.address, ackMsg.AckedPacketID)
 				case <-time.After(time.Second):
-					log.Info().Msgf("[%v] Timeout syncing ACK for packet %v", n.address, ackMsg.AckedPacketID)
+					Logger.Info().Msgf("[%v] Timeout syncing ACK for packet %v", n.address, ackMsg.AckedPacketID)
 			}
 		}()
 	}
 
-	log.Info().Msgf("[%v] Start to process status message in ACK", n.address)
+	Logger.Info().Msgf("[%v] Start to process status message in ACK", n.address)
 	// proceed to process the embedded status message
 	message, err := n.config.MessageRegistry.MarshalMessage(ackMsg.Status)
 	if err != nil {
@@ -279,7 +321,7 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecRumorsMessage And Check Neighbour: receives rumors message: %v, from: %v, relayed by: %v",
+	Logger.Info().Msgf("[%v] ExecRumorsMessage And Check Neighbour: receives rumors message: %v, from: %v, relayed by: %v",
 		n.address,
 		rumorMsg,
 		pkt.Header.Source,
@@ -291,12 +333,12 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 	if pkt.Header.Source == n.address {
 		// this is a local message from the current node
 		// should not happen
-		log.Error().Msgf("[%v] Process a local rumor message %v", n.address, rumorMsg)
+		Logger.Error().Msgf("[%v] Process a local rumor message %v", n.address, rumorMsg)
 		return nil
 	}
 
 	if pkt.Header.Source != pkt.Header.RelayedBy {
-		log.Error().Msgf("!!! Should Not Happen !!! ", pkt.Header.Source, pkt.Header.RelayedBy)
+		Logger.Error().Msgf("!!! Should Not Happen !!! ", pkt.Header.Source, pkt.Header.RelayedBy)
 	}
 
 	// process each rumor and update routing table
@@ -306,24 +348,24 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 	}
 
 	// send ack
-	log.Info().Msgf("[%v] Sending ACK to %v", n.address, pkt.Header.Source)
+	Logger.Info().Msgf("[%v] Sending ACK to %v", n.address, pkt.Header.Source)
 	ackMsg := types.AckMessage{
 		AckedPacketID: pkt.Header.PacketID,
 		Status: n.getStatusMessage(),
 	}
 	n.sendMessageUnchecked(pkt.Header.Source, ackMsg)
-	log.Info().Msgf("[%v] Sent ACK to %v", n.address, pkt.Header.Source)
+	Logger.Info().Msgf("[%v] Sent ACK to %v", n.address, pkt.Header.Source)
 
 	if expected {
 		// choose a random neighbour to broadcast
 		neighbour, err := n.getRandomNeighbourExclude(pkt.Header.RelayedBy)
 		if err != nil {
 			// we cannot find another neighbour to send the rumor, so simply abort the action
-			log.Info().Err(err)
+			Logger.Info().Err(err)
 			return nil
 		}
 
-		log.Info().Msgf("[%v] Message is expected. Broadcasting the rumor to: %v", n.address, neighbour)
+		Logger.Info().Msgf("[%v] Message is expected. Broadcasting the rumor to: %v", n.address, neighbour)
 		n.sendMessageUnchecked(neighbour, rumorMsg)
 	}
 
@@ -336,7 +378,7 @@ func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error 
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	log.Info().Msgf("[%v] ExecStatusMessage And Check Neighbour: receive status message from: %v, content: %v", n.address, pkt.Header.Source, statusMsg)
+	Logger.Info().Msgf("[%v] ExecStatusMessage And Check Neighbour: receive status message from: %v, content: %v", n.address, pkt.Header.Source, statusMsg)
 
 	n.checkNeighbour(pkt.Header.Source)
 
@@ -347,8 +389,8 @@ func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error 
 	// check if remote peer has more messages
 	for k, v := range peerStatus {
 		if myStatus[k] < v {
-			log.Info().Msgf("[%v] Is missing information, syncing with: %v", n.address, pkt.Header.Source)
-			log.Info().Msgf("[%v] local status: %v, remote %v 's status: %v", n.address, myStatus, pkt.Header.Source, peerStatus)
+			Logger.Info().Msgf("[%v] Is missing information, syncing with: %v", n.address, pkt.Header.Source)
+			Logger.Info().Msgf("[%v] local status: %v, remote %v 's status: %v", n.address, myStatus, pkt.Header.Source, peerStatus)
 			n.sendMessageUnchecked(pkt.Header.Source, myStatus)
 			inSync = false
 			break
@@ -367,7 +409,7 @@ func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error 
 
 	// send the rumors
 	if len(rumors) > 0 {
-		log.Info().Msgf("[%v] Sending missing messages to: %v, content: %v", n.address, pkt.Header.Source, rumors)
+		Logger.Info().Msgf("[%v] Sending missing messages to: %v, content: %v", n.address, pkt.Header.Source, rumors)
 		inSync = false
 		n.sendMessageUnchecked(
 			pkt.Header.Source,
@@ -380,7 +422,7 @@ func (n *node) ExecStatusMessage(msg types.Message, pkt transport.Packet) error 
 	if inSync && rand.Float64() < n.config.ContinueMongering {
 		neighbour, err := n.getRandomNeighbourExclude(pkt.Header.Source)
 		if err == nil {
-			log.Info().Msgf("[%v] Continue mongering. Sending message to: %v", n.address, neighbour)
+			Logger.Info().Msgf("[%v] Continue mongering. Sending message to: %v", n.address, neighbour)
 			n.sendMessageUnchecked(neighbour, myStatus)
 		}
 	}
@@ -402,7 +444,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 		}
 		err := n.config.MessageRegistry.ProcessPacket(pkt)
 		if err != nil {
-			log.Error().Err(err)
+			Logger.Error().Err(err)
 		}
 	}
 
@@ -440,7 +482,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 	if err != nil {
 		return err
 	}
-	log.Info().Msgf("[%v] Initiate a rumor to %v, packet id: %v, requires ack: %v, process locally: %v", n.address, neighbour, pkt.Header.PacketID, ack, process)
+	Logger.Info().Msgf("[%v] Initiate a rumor to %v, packet id: %v, requires ack: %v, process locally: %v", n.address, neighbour, pkt.Header.PacketID, ack, process)
 
 
 	// wait for ack
@@ -455,7 +497,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 			for {
 				select {
 					case <- ackTicker.C:
-						log.Info().Msgf("[%v] Timeout receiving ACK for packet %v", n.address, id)
+						Logger.Info().Msgf("[%v] Timeout receiving ACK for packet %v", n.address, id)
 						nextNeighbour, _ := n.getRandomNeighbourExclude(neighbour)
 						if len(nextNeighbour) > 0 {
 							// find the rumor in history
@@ -472,7 +514,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 						n.ackChanMap.Unlock()
 						return
 					case <- ackChan:
-						log.Info().Msgf("[%v] Receiving ACK for packet %v successful on channel", n.address, id)
+						Logger.Info().Msgf("[%v] Receiving ACK for packet %v successful on channel", n.address, id)
 
 						// TODO: check
 						n.ackChanMap.Lock()
@@ -489,7 +531,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 
 // processPacket processes the pkt.
 func (n *node) processPacket(pkt transport.Packet) error {
-	log.Info().Msgf(
+	Logger.Info().Msgf(
 		"[%v] Socket receives [%v] packet, id: %v, from: %v, relay: %v, to: %v",
 		n.address,
 		pkt.Msg.Type,
@@ -503,7 +545,7 @@ func (n *node) processPacket(pkt transport.Packet) error {
 
 // relayPacket tries to relay the packet based on the routing table.
 func (n *node) relayPacket(pkt transport.Packet) error {
-	log.Info().Msgf("[%v] Relaying packet #%v from %v to %v", n.address, pkt.Header.PacketID, pkt.Header.Source, pkt.Header.Destination)
+	Logger.Info().Msgf("[%v] Relaying packet #%v from %v to %v", n.address, pkt.Header.PacketID, pkt.Header.Source, pkt.Header.Destination)
 	sourceAddress := pkt.Header.Source
 	destAddress := pkt.Header.Destination
 
@@ -528,7 +570,7 @@ func (n *node) relayPacket(pkt transport.Packet) error {
 func (n *node) sendMessageUnchecked(dest string, message types.Message) {
 	transportMessage, err := n.config.MessageRegistry.MarshalMessage(message)
 	if err != nil {
-		log.Error().Err(err)
+		Logger.Error().Err(err)
 		return
 	}
 	header := transport.NewHeader(n.address, n.address, dest, 0)
@@ -538,16 +580,16 @@ func (n *node) sendMessageUnchecked(dest string, message types.Message) {
 	}, 0)
 
 	if err != nil {
-		log.Error().Err(err)
+		Logger.Error().Err(err)
 		return
 	}
-	log.Info().Msgf("[%v] Send Message Unchecked: type: %v, to: %v, content: %v", n.address, message.Name(), dest, message)
+	Logger.Info().Msgf("[%v] Send Message Unchecked: type: %v, to: %v, content: %v", n.address, message.Name(), dest, message)
 }
 
 func (n *node) handleSingleRumor(rumor types.Rumor, pkt transport.Packet) bool {
 
 	if rumor.Origin == n.address {
-		log.Info().Msgf("[%v] Received rumor created by me! " +
+		Logger.Info().Msgf("[%v] Received rumor created by me! " +
 			"Content: %v, packet id: %v, from %v, relay %v, to %v",
 			n.address,
 			rumor,
@@ -573,7 +615,7 @@ func (n *node) handleSingleRumor(rumor types.Rumor, pkt transport.Packet) bool {
 			Msg: &rumorMsgCopy,
 		})
 		n.SetRoutingEntry(rumorSource, pkt.Header.RelayedBy)
-		log.Error().Err(n.handleMessageInRumor(rumor.Msg, pkt))
+		Logger.Error().Err(n.handleMessageInRumor(rumor.Msg, pkt))
 	}
 	return expected
 }
@@ -583,18 +625,18 @@ func (n *node) handleMessageInRumor(msg *transport.Message, pkt transport.Packet
 		Header: pkt.Header,
 		Msg: msg,
 	}
-	log.Info().Msgf("[%v] Process message in rumor", n.address)
+	Logger.Info().Msgf("[%v] Process message in rumor", n.address)
 	return n.config.MessageRegistry.ProcessPacket(newPkt)
 }
 
 func (n *node) antiEntropy() {
 	neighbour, err := n.getRandomNeighbour()
 	if err != nil {
-		log.Info().Err(err)
+		Logger.Info().Err(err)
 		return
 	}
 
-	log.Info().Msgf("[%v] Anti-entropy message to %v", n.address, neighbour)
+	Logger.Info().Msgf("[%v] Anti-entropy message to %v", n.address, neighbour)
 	n.sendMessageUnchecked(neighbour, n.getStatusMessage())
 }
 
@@ -602,19 +644,19 @@ func (n *node) heartbeat() {
 	emptyMessage := types.EmptyMessage{}
 	message, err := n.config.MessageRegistry.MarshalMessage(emptyMessage)
 	if err != nil {
-		log.Info().Err(err)
+		Logger.Info().Err(err)
 		return
 	}
 	neighbour, err:= n.getRandomNeighbour()
 	if err != nil {
-		log.Info().Err(err)
+		Logger.Info().Err(err)
 		return
 	}
 
-	log.Info().Msgf("[%v] Heartbeat message", n.address)
+	Logger.Info().Msgf("[%v] Heartbeat message", n.address)
 	err = n.broadCast(message, neighbour, false, false)
 	if err != nil {
-		log.Info().Err(err)
+		Logger.Info().Err(err)
 	}
 }
 
@@ -623,7 +665,7 @@ func (n *node) checkNeighbour(neighbour string) {
 		n.neighbourTable.Lock()
 		defer n.neighbourTable.Unlock()
 		if !n.neighbourTable.values[neighbour] {
-			log.Info().Msgf("[%v] Is missing neighbour %v", n.address, neighbour)
+			Logger.Info().Msgf("[%v] Is missing neighbour %v", n.address, neighbour)
 			n.neighbourTable.values[neighbour] = true
 		}
 	}
