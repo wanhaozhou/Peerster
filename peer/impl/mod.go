@@ -16,7 +16,7 @@ import (
 // Improve logging
 // Snippet taken from: https://github.com/dedis/dela/blob/6aaa2373492e8b5740c0a1eb88cf2bc7aa331ac0/mod.go#L59
 
-const EnvLogLevel = ""
+const EnvLogLevel = "LLVL"
 const defaultLevel = zerolog.DebugLevel
 
 func init() {
@@ -35,10 +35,10 @@ func init() {
 		level = zerolog.DebugLevel
 	case "trace":
 		level = zerolog.TraceLevel
-	case "":
-		level = defaultLevel
+	case "no":
+		level = zerolog.NoLevel
 	default:
-		level = zerolog.TraceLevel
+		level = defaultLevel
 	}
 	Logger = Logger.Level(level)
 }
