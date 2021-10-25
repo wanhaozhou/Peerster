@@ -337,6 +337,7 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 
 	if pkt.Header.Source != pkt.Header.RelayedBy {
 		Logger.Error().Msgf("[%v] Should Not Happen! Received a rumors message from %v, relayed by %v", n.address, pkt.Header.Source, pkt.Header.RelayedBy)
+		//return nil
 	}
 
 	// process each rumor and update routing table
@@ -357,6 +358,7 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 	if expected {
 		// choose a random neighbour to broadcast
 		neighbour, err := n.getRandomNeighbourExclude(pkt.Header.RelayedBy)
+		//neighbour, err := n.getRandomNeighbourExclude(pkt.Header.Source)
 		if err != nil {
 			// we cannot find another neighbour to send the rumor, so simply abort the action
 			Logger.Info().Err(err)
