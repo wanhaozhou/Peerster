@@ -17,11 +17,9 @@ import (
 // Snippet taken from: https://github.com/dedis/dela/blob/6aaa2373492e8b5740c0a1eb88cf2bc7aa331ac0/mod.go#L59
 
 const EnvLogLevel = "LLVL"
-const defaultLevel = zerolog.DebugLevel
-
+const defaultLevel = zerolog.NoLevel
 func init() {
 	lvl := os.Getenv(EnvLogLevel)
-
 	var level zerolog.Level
 
 	switch lvl {
@@ -66,7 +64,7 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 		stop: make(chan bool),
 		routingTable: routingTable{values:make(map[string]string)},
 		neighbourTable: neighbourTable{values: make(map[string]bool)},
-		ackRumors: ackRumors{ values: make(map[string][]types.Rumor)},
+		ackRumors: ackRumors{values: make(map[string][]types.Rumor)},
 		ackChanMap: ackChanMap{values: make(map[string]chan bool)},
 	}
 
@@ -338,7 +336,7 @@ func (n *node) ExecRumorsMessage(msg types.Message, pkt transport.Packet) error 
 	}
 
 	if pkt.Header.Source != pkt.Header.RelayedBy {
-		Logger.Error().Msgf("!!! Should Not Happen !!! ", pkt.Header.Source, pkt.Header.RelayedBy)
+		Logger.Error().Msgf("[%v] Should Not Happen! Received a rumors message from %v, relayed by %v", n.address, pkt.Header.Source, pkt.Header.RelayedBy)
 	}
 
 	// process each rumor and update routing table
@@ -508,7 +506,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 								Rumors: []types.Rumor{resendRumor},
 							})
 						}
-						// TODO: check
+
 						n.ackChanMap.Lock()
 						delete(n.ackChanMap.values, id)
 						n.ackChanMap.Unlock()
@@ -516,7 +514,6 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 					case <- ackChan:
 						Logger.Info().Msgf("[%v] Receiving ACK for packet %v successful on channel", n.address, id)
 
-						// TODO: check
 						n.ackChanMap.Lock()
 						delete(n.ackChanMap.values, id)
 						n.ackChanMap.Unlock()
@@ -714,16 +711,18 @@ func (n *node) getRandomNeighbourExclude(exclude string) (string, error) {
 	return "", err
 }
 
-// view
-type ackRumors struct {
-	sync.RWMutex
-	values map[string][]types.Rumor
-}
 
 type routingTable struct {
 	sync.RWMutex
 	values map[string]string
 }
+
+
+type ackRumors struct {
+	sync.RWMutex
+	values map[string][]types.Rumor
+}
+
 
 type ackChanMap struct {
 	sync.RWMutex
