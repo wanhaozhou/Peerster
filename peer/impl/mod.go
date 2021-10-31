@@ -69,6 +69,8 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 		config:                 conf,
 		address:                conf.Socket.GetAddress(),
 		stop:                   make(chan bool, 1),
+		heartbeatChan:			make(chan bool, 1),
+		antiEntropyChan:		make(chan bool, 1),
 		routingTable:           routingTable{values:make(map[string]string)},
 		neighbourTable:         neighbourTable{values: make(map[string]bool)},
 		ackRumors:              ackRumors{values: make(map[string][]types.Rumor)},
@@ -111,6 +113,8 @@ type node struct {
 	config peer.Configuration
 	address string
 	stop chan bool
+	heartbeatChan chan bool
+	antiEntropyChan chan bool
 	routingTable routingTable
 	neighbourTable neighbourTable
 	ackRumors ackRumors
@@ -156,7 +160,7 @@ func (n *node) Start() error {
 	go func() {
 		for n.antiEntropyTicker != nil {
 			select {
-			case <- n.stop:
+			case <- n.antiEntropyChan:
 				n.antiEntropyTicker.Stop()
 				return
 			case <- n.antiEntropyTicker.C:
@@ -169,7 +173,7 @@ func (n *node) Start() error {
 	go func() {
 		for n.heartbeatTicker != nil {
 			select {
-			case <- n.stop:
+			case <- n.heartbeatChan:
 				n.heartbeatTicker.Stop()
 				return
 			case <- n.heartbeatTicker.C:
@@ -196,6 +200,21 @@ func (n *node) Stop() error {
 	default:
 		Logger.Info().Msgf("[%v] Cannot send stop signal. Shutting down ungracefully", n.address)
 	}
+
+	select {
+	case n.heartbeatChan <- true:
+		break
+	default:
+		Logger.Info().Msgf("[%v] Cannot send stop signal to heartbeat. Shutting down ungracefully", n.address)
+	}
+
+	select {
+	case n.antiEntropyChan <- true:
+		break
+	default:
+		Logger.Info().Msgf("[%v] Cannot send stop signal to anti-entropy. Shutting down ungracefully", n.address)
+	}
+
 	return nil
 }
 
@@ -1131,10 +1150,16 @@ func (n *node) ExecDataReplyMessage(msg types.Message, pkt transport.Packet) err
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
 	Logger.Info().Msgf("[%v] ExecDataReplyMessage: receive data reply message from %v, replayed by %v", n.address, pkt.Header.Source, pkt.Header.RelayedBy)
-	n.ackDataRequest.Lock()
-	n.ackDataRequest.values[dataReplyMessage.RequestID] <- append([]byte(nil), dataReplyMessage.Value...)
-	n.ackDataRequest.Unlock()
-	Logger.Info().Msgf("[%v] ExecDataReplyMessage: send bytes in to channel id=%v", n.address, dataReplyMessage.RequestID)
+	n.ackDataRequest.RLock()
+	replyChan := n.ackDataRequest.values[dataReplyMessage.RequestID]
+	n.ackDataRequest.RUnlock()
+	select {
+		case replyChan <- append([]byte(nil), dataReplyMessage.Value...):
+			Logger.Info().Msgf("[%v] ExecDataReplyMessage: send bytes in to channel id=%v", n.address, dataReplyMessage.RequestID)
+			break
+		default:
+			Logger.Info().Msgf("[%v] Data reply chan is full", n.address)
+	}
 	return nil
 }
 
