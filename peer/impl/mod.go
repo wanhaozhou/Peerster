@@ -682,7 +682,7 @@ func (n *node) heartbeat() {
 		Logger.Info().Msg(err.Error())
 		return
 	}
-	neighbour, err:= n.getRandomNeighbour()
+	neighbour, _:= n.getRandomNeighbour()
 	Logger.Info().Msgf("[%v] Heartbeat message to: %v", n.address, neighbour)
 	err = n.broadCast(message, neighbour, false, false)
 	if err != nil {
