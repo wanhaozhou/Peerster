@@ -1154,11 +1154,11 @@ func (n *node) ExecDataReplyMessage(msg types.Message, pkt transport.Packet) err
 	replyChan := n.ackDataRequest.values[dataReplyMessage.RequestID]
 	n.ackDataRequest.RUnlock()
 	select {
-		case replyChan <- append([]byte(nil), dataReplyMessage.Value...):
-			Logger.Info().Msgf("[%v] ExecDataReplyMessage: send bytes in to channel id=%v", n.address, dataReplyMessage.RequestID)
-			break
-		default:
-			Logger.Info().Msgf("[%v] Data reply chan is full", n.address)
+	case replyChan <- append([]byte(nil), dataReplyMessage.Value...):
+		Logger.Info().Msgf("[%v] ExecDataReplyMessage: send bytes in to channel id=%v", n.address, dataReplyMessage.RequestID)
+		break
+	default:
+		Logger.Info().Msgf("[%v] Data reply chan is full", n.address)
 	}
 	return nil
 }
