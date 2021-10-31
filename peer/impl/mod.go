@@ -1153,13 +1153,15 @@ func (n *node) ExecDataReplyMessage(msg types.Message, pkt transport.Packet) err
 	n.ackDataRequest.RLock()
 	replyChan := n.ackDataRequest.values[dataReplyMessage.RequestID]
 	n.ackDataRequest.RUnlock()
-	select {
-	case replyChan <- append([]byte(nil), dataReplyMessage.Value...):
-		Logger.Info().Msgf("[%v] ExecDataReplyMessage: send bytes in to channel id=%v", n.address, dataReplyMessage.RequestID)
-		break
-	default:
-		Logger.Info().Msgf("[%v] Data reply chan is full", n.address)
-	}
+	go func() {
+		select {
+		case replyChan <- append([]byte(nil), dataReplyMessage.Value...):
+			Logger.Info().Msgf("[%v] ExecDataReplyMessage: send bytes in to channel id=%v", n.address, dataReplyMessage.RequestID)
+			break
+		case <- time.After(time.Second):
+			Logger.Info().Msgf("[%v] Data reply chan is full", n.address)
+		}
+	}()
 	return nil
 }
 
@@ -1265,23 +1267,30 @@ func (n *node) ExecSearchReplyMessage(msg types.Message, pkt transport.Packet) e
 	}
 
 	n.ackSearchAllRequest.RLock()
-	select {
-	case n.ackSearchAllRequest.values[searchReplyMsg.RequestID] <- names:
-		Logger.Info().Msgf("[%v] Notifies the peer of search all reply, names=%v, from=%v", n.address, names, pkt.Header.Source)
-	default:
-		Logger.Info().Msgf("[%v] Search all notification channel is full", n.address)
-	}
+	searchAllChan := n.ackSearchAllRequest.values[searchReplyMsg.RequestID]
 	n.ackSearchAllRequest.RUnlock()
+	go func() {
+		select {
+		case searchAllChan <- names:
+			Logger.Info().Msgf("[%v] Notifies the peer of search all reply, names=%v, from=%v", n.address, names, pkt.Header.Source)
+		case <- time.After(time.Second):
+			Logger.Info().Msgf("[%v] Search all notification channel is full", n.address)
+		}
+	}()
+
 
 	if len(fullFileNames) > 0 {
 		n.ackSearchFirstRequest.RLock()
-		select {
-		case n.ackSearchFirstRequest.values[searchReplyMsg.RequestID] <- fullFileNames[0]:
-			Logger.Info().Msgf("[%v] Notifies the peer of search first reply, filename=%v, from=%v", n.address, fullFileNames[0], pkt.Header.Source)
-		default:
-			Logger.Info().Msgf("[%v] Search first notification channel is full", n.address)
-		}
+		searchFirstChan := n.ackSearchFirstRequest.values[searchReplyMsg.RequestID]
 		n.ackSearchFirstRequest.RUnlock()
+		go func() {
+			select {
+			case searchFirstChan <- fullFileNames[0]:
+				Logger.Info().Msgf("[%v] Notifies the peer of search first reply, filename=%v, from=%v", n.address, fullFileNames[0], pkt.Header.Source)
+			case <- time.After(time.Second):
+				Logger.Info().Msgf("[%v] Search first notification channel is full", n.address)
+			}
+		}()
 	}
 	return nil
 }
