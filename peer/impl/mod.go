@@ -960,7 +960,6 @@ func (n *node) Download(metaHash string) ([]byte, error) {
 		}
 		allChunks = append(allChunks, append([]byte(nil), file...))
 		allBytes = append(allBytes, file...)
-		continue
 	}
 
 	if len(allChunks) != len(chunkHashes) {
@@ -1410,7 +1409,7 @@ func (n *node) downloadFromPeers(hash string) ([]byte, error) {
 
 	var file []byte
 
-	// TODO: attempt < backoff.Retry or attempt <= backoff.Retry
+	// TODO: attempt < backoff.Retry or attempt <= backoff.Retry ?
 	loop:
 	for attempt := uint(0); attempt < backoff.Retry; attempt++ {
 		duration := time.Duration(backoff.Initial.Milliseconds() * n.pow(backoff.Factor, attempt)) * time.Millisecond
@@ -1447,12 +1446,6 @@ func (n *node) uniCastMessage(dest string, message types.Message) error {
 		return err
 	}
 	return n.Unicast(dest, transportMessage)
-	//err = n.Unicast(dest, transportMessage)
-	//if err != nil {
-	//	Logger.Error().Msg(err.Error())
-	//}
-	//n.sendMessageUnchecked(dest, message)
-	//return nil
 }
 
 func (n *node) pow(x uint, y uint) int64 {
