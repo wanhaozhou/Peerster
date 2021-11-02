@@ -1395,17 +1395,16 @@ func (n *node) downloadFromPeers(hash string) ([]byte, error) {
 		Key:       hash,
 	}
 
-	err := n.uniCastMessage(randomPeer, requestMsg)
-	if err != nil {
-		return nil, err
-	}
-
-	Logger.Info().Msgf("[%v] Asking peer=%v for file=%v, request id=%v", n.address, randomPeer, hash, requestId)
-
 	dataChan := make(chan []byte, 1)
 	n.ackDataRequest.Lock()
 	n.ackDataRequest.values[requestId] = dataChan
 	n.ackDataRequest.Unlock()
+
+	err := n.uniCastMessage(randomPeer, requestMsg)
+	if err != nil {
+		return nil, err
+	}
+	Logger.Info().Msgf("[%v] Asking peer=%v for file=%v, request id=%v", n.address, randomPeer, hash, requestId)
 
 	var file []byte
 
