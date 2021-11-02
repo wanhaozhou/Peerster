@@ -1034,14 +1034,14 @@ func (n *node) SearchAll(reg regexp.Regexp, budget uint, timeout time.Duration) 
 	loop:
 	for {
 		select {
-		case <- time.After(timeout):
-			break loop
 		case receivedNames := <- dataChan:
 			if len(receivedNames) > 0 {
 				for _, name := range receivedNames {
 					nameSet[name] = true
 				}
 			}
+		case <- time.After(timeout):
+			break loop
 		}
 	}
 
@@ -1100,12 +1100,12 @@ func (n *node) SearchFirst(reg regexp.Regexp, conf peer.ExpandingRing) (string, 
 		}
 
 		select {
-		case <- time.After(conf.Timeout):
-			continue loop
 		case match := <- dataChan:
 			nameHolder = append(nameHolder, match)
 			Logger.Info().Msgf("[%v] Received search first answer: %v", n.address, match)
 			break loop
+		case <- time.After(conf.Timeout):
+			continue loop
 		}
 	}
 
@@ -1414,18 +1414,18 @@ func (n *node) downloadFromPeers(hash string) ([]byte, error) {
 	for attempt := uint(0); attempt < backoff.Retry; attempt++ {
 		duration := time.Duration(backoff.Initial.Milliseconds() * n.pow(backoff.Factor, attempt)) * time.Millisecond
 		select {
-		case <- time.After(duration):
-			Logger.Info().Msgf("[%v] Retry to send file request, id=%v, hash=%v", n.address, requestId, hash)
-			err = n.uniCastMessage(randomPeer, requestMsg)
-			if err != nil {
-				return nil, err
-			}
 		case buf := <- dataChan:
 			if buf == nil {
 				return nil, xerrors.Errorf("[%v] Receive nil file of hash=%v from peer=%v", n.address, hash, randomPeer)
 			}
 			file = append(file, buf...)
 			break loop
+		case <- time.After(duration):
+			Logger.Info().Msgf("[%v] Retry to send file request, id=%v, hash=%v", n.address, requestId, hash)
+			err = n.uniCastMessage(randomPeer, requestMsg)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
