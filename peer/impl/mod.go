@@ -24,7 +24,7 @@ import (
 // Snippet taken from: https://github.com/dedis/dela/blob/6aaa2373492e8b5740c0a1eb88cf2bc7aa331ac0/mod.go#L59
 
 const EnvLogLevel = "LLVL"
-const defaultLevel = zerolog.NoLevel
+const defaultLevel = zerolog.ErrorLevel
 func init() {
 	lvl := os.Getenv(EnvLogLevel)
 	var level zerolog.Level
