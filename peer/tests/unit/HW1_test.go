@@ -3,7 +3,6 @@ package unit
 import (
 	"encoding/json"
 	"fmt"
-	"go.dedis.ch/cs438/peer/impl"
 	"io"
 	"math/rand"
 	"sort"
@@ -426,9 +425,6 @@ func Test_HW1_Messaging_Broadcast_ContinueMongering(t *testing.T) {
 	require.Len(t, n1Outs, 4)
 
 	pkt = n1Outs[0]
-	if pkt.Msg.Type != "rumor" {
-		impl.Logger.Error().Msgf("!!!!![%v][%v][%v][%v]", n1Outs[0].Msg.Type, n1Outs[1].Msg.Type, n1Outs[2].Msg.Type, n1Outs[3].Msg.Type)
-	}
 	require.Equal(t, "rumor", pkt.Msg.Type)
 
 	pkt = n1Outs[1]
