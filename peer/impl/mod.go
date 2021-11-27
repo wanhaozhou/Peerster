@@ -1507,16 +1507,26 @@ func (n *node) Tag(name string, mh string) error {
 
 	Logger.Info().Msgf("[%v] Tag started", n.address)
 
+	// Apparently, the currentStep cannot be the same as prevStep when iteration starts
+	prevStep := ^uint(0) - 1
+	var paxosId uint
 	var currentStep uint
 
 	loop:
-	for i := uint(0); i < ^uint(0); i++ {
-		// Phase One
-		paxosId := n.config.PaxosID + (n.config.TotalPeers * i)
-
+	for {
 		n.step.RLock()
 		currentStep = n.step.value
 		n.step.RUnlock()
+
+		// Check if we are still in the same paxos instance
+		if currentStep == prevStep {
+			paxosId = paxosId + n.config.TotalPeers
+		} else {
+			paxosId = n.config.PaxosID
+			prevStep = currentStep
+		}
+
+		Logger.Error().Msgf("[%v] Start Paxos. Step=%v, Id=%v", n.address, currentStep, paxosId)
 
 		n.proposer.Lock()
 		// Make sure that we are in phase one
