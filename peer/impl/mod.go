@@ -681,7 +681,6 @@ func (n *node) sendMessageUnchecked(dest string, message types.Message) {
 }
 
 func (n *node) handleSingleRumor(rumor types.Rumor, pkt transport.Packet) bool {
-
 	if rumor.Origin == n.address {
 		Logger.Info().Msgf("[%v] Received rumor created by me! " +
 			"Content: %v, packet id: %v, from %v, relay %v, to %v",
@@ -693,7 +692,6 @@ func (n *node) handleSingleRumor(rumor types.Rumor, pkt transport.Packet) bool {
 			pkt.Header.Destination,
 		)
 	}
-
 
 	expected := false
 	rumorSource := rumor.Origin
