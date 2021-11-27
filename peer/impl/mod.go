@@ -91,7 +91,6 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 								},
 		acceptor: 				acceptor{maxId: uint(0), acceptedId: uint(0), acceptedValue: nil},
 		proposer: 				proposer{
-									proposer: false,
 									phaseOne: true,
 									highestAcceptedId: uint(0),
 									highestAcceptedValue: nil,
@@ -113,6 +112,11 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 
 	if conf.PaxosProposerRetry > 0 {
 		newNode.proposerTicker = time.NewTicker(conf.PaxosProposerRetry)
+	}
+
+	if newNode.step.finished[0] == nil {
+		finishedChan := make(chan bool, newNode.config.TotalPeers)
+		newNode.step.finished[0] = finishedChan
 	}
 
 	newNode.AddPeer(conf.Socket.GetAddress())
@@ -1503,10 +1507,6 @@ func (n *node) Tag(name string, mh string) error {
 
 	Logger.Info().Msgf("[%v] Tag started", n.address)
 
-	n.proposer.Lock()
-	n.proposer.proposer = true
-	n.proposer.Unlock()
-
 	var currentStep uint
 
 	loop:
@@ -1520,7 +1520,7 @@ func (n *node) Tag(name string, mh string) error {
 
 		n.proposer.Lock()
 		// Make sure that we are in phase one
-		n.proposer.phaseOne = true
+		n.proposer.resetWithoutLocking()
 		// We use the following key as a unique identifier for each iteration of a paxos instance
 		iterationId := fmt.Sprintf("%v#%v", currentStep, paxosId)
 		phaseOneSuccessChan := make(chan bool, n.config.TotalPeers)
@@ -1554,8 +1554,7 @@ func (n *node) Tag(name string, mh string) error {
 
 		// Now continue with phase 2
 		n.proposer.Lock()
-		// Make sure that we are in phase two
-		n.proposer.phaseOne = false
+
 		acceptedValue := n.proposer.highestAcceptedValue
 		var paxosValue types.PaxosValue
 		var uniqueId string
@@ -1593,15 +1592,9 @@ func (n *node) Tag(name string, mh string) error {
 
 		select {
 		case <- n.proposerTicker.C:
-			n.proposer.Lock()
-			n.proposer.phaseOne = true
-			n.proposer.Unlock()
 			Logger.Info().Msgf("[%v] Timeout for phase two....", n.address)
 			continue loop
 		case <- phaseTwoSuccessChan:
-			n.proposer.Lock()
-			n.proposer.phaseOne = true
-			n.proposer.Unlock()
 			Logger.Info().Msgf("[%v] Phase two succeeds", n.address)
 			break loop
 		}
@@ -1612,9 +1605,10 @@ func (n *node) Tag(name string, mh string) error {
 	n.step.RUnlock()
 
 	for finishedChan != nil {
+		Logger.Error().Msgf("[%v] Start waiting for result of step=%v, addr=%p", n.address, currentStep, finishedChan)
 		select {
 		case <- finishedChan:
-			Logger.Info().Msgf("[%v] Tag finished for step=%v", n.address, currentStep)
+			Logger.Error().Msgf("[%v] Tag finished for step=%v", n.address, currentStep)
 			return nil
 		}
 	}
@@ -1656,9 +1650,6 @@ func (a *acceptor) resetWithoutLocking() {
 type proposer struct {
 	sync.RWMutex
 
-	// whether the current node is in proposer or not
-	proposer bool
-
 	// whether the proposer is in phaseOne or not
 	phaseOne bool
 
@@ -1680,7 +1671,6 @@ type proposer struct {
 }
 
 func (p *proposer) resetWithoutLocking() {
-	p.proposer = false
 	p.phaseOne = true
 	p.highestAcceptedId = 0
 	p.highestAcceptedValue = nil
@@ -1723,8 +1713,6 @@ func (n *node) ExecPaxosPrepareMessage(msg types.Message, pkt transport.Packet) 
 
 	n.step.RLock()
 	n.acceptor.Lock()
-	//defer n.acceptor.Unlock()
-	//defer n.step.RUnlock()
 
 	// Ignore messages whose Step field do not match your current logical clock (which starts at 0)
 	proposedStep := paxosPrepareMessage.Step
@@ -1809,8 +1797,6 @@ func (n *node) ExecPaxosProposeMessage(msg types.Message, pkt transport.Packet) 
 
 	n.step.RLock()
 	n.acceptor.Lock()
-	//defer n.acceptor.Unlock()
-	//defer n.step.RUnlock()
 
 	// Ignore messages whose Step field do not match your current logical clock (which starts at 0)
 	proposedStep := paxosProposeMessage.Step
@@ -1828,6 +1814,12 @@ func (n *node) ExecPaxosProposeMessage(msg types.Message, pkt transport.Packet) 
 		n.step.RUnlock()
 		return nil
 	}
+
+	// Now we see that this is a valid propose message
+	n.proposer.Lock()
+	Logger.Info().Msgf("[%v] Enters phase two of step=%v propose id=%v", n.address, proposedStep, proposedId)
+	n.proposer.phaseOne = false
+	n.proposer.Unlock()
 
 	paxosValue := copyPaxosValue(paxosProposeMessage.Value)
 	n.acceptor.acceptedId = proposedId
@@ -1872,7 +1864,7 @@ func (n *node) ExecPaxosPromiseMessage(msg types.Message, pkt transport.Packet) 
 		return nil
 	}
 
-	if n.proposer.proposer && !n.proposer.phaseOne {
+	if !n.proposer.phaseOne {
 		Logger.Info().Msgf("[%v] received promise message, however, proposer is not in phase one", n.address)
 		n.proposer.Unlock()
 		n.step.RUnlock()
@@ -1933,7 +1925,7 @@ func (n *node) ExecPaxosAcceptMessage(msg types.Message, pkt transport.Packet) e
 		return nil
 	}
 
-	if n.proposer.proposer && n.proposer.phaseOne {
+	if n.proposer.phaseOne {
 		Logger.Info().Msgf("[%v] received accept message, however, proposer is not in phase two", n.address)
 		n.proposer.Unlock()
 		return nil
@@ -1952,10 +1944,6 @@ func (n *node) ExecPaxosAcceptMessage(msg types.Message, pkt transport.Packet) e
 
 	if len(n.proposer.phaseTwoAcceptedPeers[uniqueId]) >= n.config.PaxosThreshold(n.config.TotalPeers) {
 		n.proposer.consensusValueMap[currentStep] = copyPaxosValue(paxosAcceptMessage.Value)
-
-		n.step.Lock()
-		n.step.finished[currentStep] = make(chan bool, 1)
-		n.step.Unlock()
 
 		select {
 		case n.proposer.phaseTwoSuccessChanMap[uniqueId] <- true:
@@ -1980,12 +1968,12 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 	}
 	Logger.Info().Msgf("[%v] ExecTLCMessage. id=%v: receive tlc message from %v, replayed by %v", n.address, pkt.Header.PacketID, pkt.Header.Source, pkt.Header.RelayedBy)
 
-	n.step.RLock()
+	n.step.Lock()
 	n.acceptor.Lock()
 	n.proposer.Lock()
 	defer n.proposer.Unlock()
 	defer n.acceptor.Unlock()
-	defer n.step.RUnlock()
+	defer n.step.Unlock()
 
 	if tlcMessage.Step < n.step.value {
 		Logger.Info().Msgf("[%v] ExecTLCMessage. TLC message is outdated", n.address)
@@ -2036,13 +2024,17 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 
 		// Increase by 1 its internal TLC step
 		n.step.value++
+		if n.step.finished[n.step.value] == nil {
+			finishedChan := make(chan bool, n.config.TotalPeers)
+			n.step.finished[n.step.value] = finishedChan
+		}
 
 		// Catch up if necessary
 		err = n.catchUpTLCWithoutLocking()
 		if err != nil {
 			return err
 		}
-		Logger.Info().Msgf("[%v] catchUpTLC ended. current step=%v", n.address, n.step.value)
+		Logger.Error().Msgf("[%v] catchUpTLC ended. current step=%v", n.address, n.step.value)
 
 		// reset paxos acceptor, proposer
 		n.acceptor.resetWithoutLocking()
@@ -2051,7 +2043,7 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 		if n.step.finished[n.step.value - 1] != nil {
 			select {
 			case n.step.finished[n.step.value - 1] <- true:
-				Logger.Info().Msgf("[%v] Sending tag result of step=%v", n.address, n.step.value - 1)
+				Logger.Error().Msgf("[%v] Sent tag result of step=%v to addr=%p", n.address, n.step.value - 1, n.step.finished[n.step.value - 1])
 			default:
 				Logger.Warn().Msgf("[%v] Error Sending tag result of step=%v", n.address, n.step.value - 1)
 			}
@@ -2133,6 +2125,10 @@ func (n *node) catchUpTLCWithoutLocking() error {
 
 		// Increase by 1 its internal TLC step
 		n.step.value++
+		if n.step.finished[n.step.value] == nil {
+			finishedChan := make(chan bool, n.config.TotalPeers)
+			n.step.finished[n.step.value] = finishedChan
+		}
 
 		// Catch up if necessary
 		err = n.catchUpTLCWithoutLocking()
