@@ -83,7 +83,12 @@ func NewPeer(conf peer.Configuration) peer.Peer {
 		ackSearchAllRequest:    ackSearchAllRequest{values: make(map[string]chan []string)},
 		ackSearchFirstRequest:  ackSearchFirstRequest{values: make(map[string]chan string)},
 		processedSearchRequest: processedSearchRequest{values: make(map[string]bool)},
-		step: 					step{value: uint(0), tlcMessages: make(map[uint][]types.TLCMessage), tlcMessagesSent: make(map[uint]bool)},
+		step: 					step{
+									value: uint(0),
+									tlcMessages: make(map[uint][]types.TLCMessage),
+									tlcMessagesSent: make(map[uint]bool),
+									finished: make(map[uint]chan bool),
+								},
 		acceptor: 				acceptor{maxId: uint(0), acceptedId: uint(0), acceptedValue: nil},
 		proposer: 				proposer{
 									proposer: false,
@@ -712,14 +717,15 @@ func (n *node) handleSingleRumor(rumor types.Rumor, pkt transport.Packet) bool {
 			"[%v] The rumor is expected. Rumor source=%v, Pkt Source=%v, Pkt Relayed by=%v",
 			n.address, rumorSource, pkt.Header.Source, pkt.Header.RelayedBy)
 		n.SetRoutingEntry(rumorSource, pkt.Header.RelayedBy)
-		Logger.Error().Err(n.handleMessageInRumor(rumor.Msg, pkt))
+		Logger.Error().Err(n.handleMessageInRumor(rumorSource, rumor.Msg, pkt))
 	}
 	return expected
 }
 
-func (n *node) handleMessageInRumor(msg *transport.Message, pkt transport.Packet) error {
+func (n *node) handleMessageInRumor(rumorSource string, msg *transport.Message, pkt transport.Packet) error {
+	rumorHeader := transport.NewHeader(rumorSource, pkt.Header.RelayedBy, pkt.Header.Destination, pkt.Header.TTL)
 	newPkt := transport.Packet{
-		Header: pkt.Header,
+		Header: &rumorHeader,
 		Msg: msg,
 	}
 	Logger.Info().Msgf("[%v] Process message in rumor, type=%v", n.address, msg.Type)
@@ -1497,18 +1503,22 @@ func (n *node) Tag(name string, mh string) error {
 		return nil
 	}
 
-	n.step.RLock()
-	currentStep := n.step.value
-	n.step.RUnlock()
+	Logger.Info().Msgf("[%v] Tag started", n.address)
 
 	n.proposer.Lock()
 	n.proposer.proposer = true
 	n.proposer.Unlock()
 
+	var currentStep uint
+
 	loop:
 	for i := uint(0); i < ^uint(0); i++ {
 		// Phase One
 		paxosId := n.config.PaxosID + (n.config.TotalPeers * i)
+
+		n.step.RLock()
+		currentStep = n.step.value
+		n.step.RUnlock()
 
 		n.proposer.Lock()
 		// Make sure that we are in phase one
@@ -1599,53 +1609,19 @@ func (n *node) Tag(name string, mh string) error {
 		}
 	}
 
-	Logger.Info().Msgf("[%v] Consensus reached, now we need to send TLC", n.address)
-	n.proposer.RLock()
-	paxosValue := n.proposer.consensusValueMap[currentStep]
-	n.proposer.RUnlock()
+	n.step.RLock()
+	finishedChan := n.step.finished[currentStep]
+	n.step.RUnlock()
 
-	hash := crypto.SHA256.New()
-	var prevHash []byte
-	if currentStep == 0 {
-		prevHash = make([]byte, 32)
-	} else {
-		prevHash = n.config.Storage.GetBlockchainStore().Get(storage.LastBlockKey)
-	}
-	data := [][]byte{
-		[]byte(strconv.Itoa(int(currentStep))),
-		[]byte(paxosValue.UniqID),
-		[]byte(paxosValue.Filename),
-		[]byte(paxosValue.Metahash),
-		prevHash,
-	}
-	for _, d := range data {
-		_, err := hash.Write(d)
-		if err != nil {
-			Logger.Error().Msgf("[%v] Error writing %v to hash", n.address, string(d))
-			return err
+	for finishedChan != nil {
+		select {
+		case <- finishedChan:
+			Logger.Info().Msgf("[%v] Tag finished for step=%v", n.address, currentStep)
+			return nil
 		}
 	}
 
-	message := types.TLCMessage{
-		Step: currentStep,
-		Block: types.BlockchainBlock{
-			Index:    currentStep,
-			Hash:     append([]byte(nil), hash.Sum(nil)...),
-			Value:    copyPaxosValue(paxosValue),
-			PrevHash: prevHash,
-		},
-	}
-	transportMessage, err := n.config.MessageRegistry.MarshalMessage(message)
-	if err != nil {
-		return err
-	}
-
-	Logger.Info().Msgf("[%v] Broadcasting TLC message", n.address)
-	n.step.Lock()
-	n.step.tlcMessagesSent[currentStep] = true
-	n.step.Unlock()
-
-	return n.Broadcast(transportMessage)
+	return nil
 }
 
 // step records:
@@ -1656,6 +1632,7 @@ type step struct {
 	value uint
 	tlcMessages map[uint][]types.TLCMessage
 	tlcMessagesSent map[uint]bool
+	finished map[uint]chan bool
 }
 
 // acceptor is the internal acceptor state corresponding to one instance of Paxos
@@ -1748,19 +1725,23 @@ func (n *node) ExecPaxosPrepareMessage(msg types.Message, pkt transport.Packet) 
 
 	n.step.RLock()
 	n.acceptor.Lock()
-	defer n.acceptor.Unlock()
-	defer n.step.RUnlock()
+	//defer n.acceptor.Unlock()
+	//defer n.step.RUnlock()
 
 	// Ignore messages whose Step field do not match your current logical clock (which starts at 0)
 	proposedStep := paxosPrepareMessage.Step
 	if proposedStep != n.step.value {
 		Logger.Info().Msgf("[%v] step does not match in prepare message. step in message=%v, step in peer=%v", n.address, proposedStep, n.step.value)
+		n.acceptor.Unlock()
+		n.step.RUnlock()
 		return nil
 	}
 
 	proposedId := paxosPrepareMessage.ID
 	if proposedId <= n.acceptor.maxId {
 		Logger.Info().Msgf("[%v] paxos id is not greater. id in message=%v, id in peer=%v", n.address, proposedId, n.acceptor.maxId)
+		n.acceptor.Unlock()
+		n.step.RUnlock()
 		return nil
 	}
 
@@ -1781,6 +1762,8 @@ func (n *node) ExecPaxosPrepareMessage(msg types.Message, pkt transport.Packet) 
 	}
 	promiseTransportMessage, err := n.config.MessageRegistry.MarshalMessage(promiseMessage)
 	if err != nil {
+		n.acceptor.Unlock()
+		n.step.RUnlock()
 		return err
 	}
 
@@ -1795,6 +1778,8 @@ func (n *node) ExecPaxosPrepareMessage(msg types.Message, pkt transport.Packet) 
 	}
 	privateTransportMessage, err := n.config.MessageRegistry.MarshalMessage(privateMessage)
 	if err != nil {
+		n.acceptor.Unlock()
+		n.step.RUnlock()
 		return err
 	}
 
@@ -1810,6 +1795,8 @@ func (n *node) ExecPaxosPrepareMessage(msg types.Message, pkt transport.Packet) 
 	//
 	////This is the case when we receive a prepare message from remote peers
 
+	n.acceptor.Unlock()
+	n.step.RUnlock()
 	return n.Broadcast(privateTransportMessage)
 }
 
@@ -1824,19 +1811,23 @@ func (n *node) ExecPaxosProposeMessage(msg types.Message, pkt transport.Packet) 
 
 	n.step.RLock()
 	n.acceptor.Lock()
-	defer n.acceptor.Unlock()
-	defer n.step.RUnlock()
+	//defer n.acceptor.Unlock()
+	//defer n.step.RUnlock()
 
 	// Ignore messages whose Step field do not match your current logical clock (which starts at 0)
 	proposedStep := paxosProposeMessage.Step
 	if proposedStep != n.step.value {
 		Logger.Info().Msgf("[%v] step does not match in propose message. step in message=%v, step in peer=%v", n.address, proposedStep, n.step.value)
+		n.acceptor.Unlock()
+		n.step.RUnlock()
 		return nil
 	}
 
 	proposedId := paxosProposeMessage.ID
 	if proposedId != n.acceptor.maxId {
 		Logger.Info().Msgf("[%v] maxId does not match. maxId in message=%v, maxId in peer=%v", n.address, proposedId, n.acceptor.maxId)
+		n.acceptor.Unlock()
+		n.step.RUnlock()
 		return nil
 	}
 
@@ -1851,10 +1842,14 @@ func (n *node) ExecPaxosProposeMessage(msg types.Message, pkt transport.Packet) 
 
 	acceptTransportMessage, err := n.config.MessageRegistry.MarshalMessage(acceptMessage)
 	if err != nil {
+		n.acceptor.Unlock()
+		n.step.RUnlock()
 		return err
 	}
 
 	Logger.Info().Msgf("[%v] ExecPaxosProposeMessage: begin to broadcast an accept message", n.address)
+	n.acceptor.Unlock()
+	n.step.RUnlock()
 	return n.Broadcast(acceptTransportMessage)
 }
 
@@ -1869,18 +1864,20 @@ func (n *node) ExecPaxosPromiseMessage(msg types.Message, pkt transport.Packet) 
 
 	n.step.RLock()
 	n.proposer.Lock()
-	defer n.proposer.Unlock()
-	defer n.step.RUnlock()
 
 	// Ignore messages whose Step field do not match your current logical clock (which starts at 0)
 	proposedStep := paxosPromiseMessage.Step
 	if proposedStep != n.step.value {
 		Logger.Info().Msgf("[%v] step does not match in promise message. step in message=%v, step in peer=%v", n.address, proposedStep, n.step.value)
+		n.proposer.Unlock()
+		n.step.RUnlock()
 		return nil
 	}
 
 	if n.proposer.proposer && !n.proposer.phaseOne {
 		Logger.Info().Msgf("[%v] received promise message, however, proposer is not in phase one", n.address)
+		n.proposer.Unlock()
+		n.step.RUnlock()
 		return nil
 	}
 
@@ -1906,9 +1903,12 @@ func (n *node) ExecPaxosPromiseMessage(msg types.Message, pkt transport.Packet) 
 		case n.proposer.phaseOneSuccessChanMap[iterationId] <- true:
 			Logger.Info().Msgf("[%v] Phase one of iteration=%v succeeded", n.address, iterationId)
 		default:
-			Logger.Error().Msgf("[%v] Cannot send signal to iteration=%v for phase one", n.address, iterationId)
+			Logger.Warn().Msgf("[%v] Cannot send signal to iteration=%v for phase one", n.address, iterationId)
 		}
 	}
+
+	n.proposer.Unlock()
+	n.step.RUnlock()
 	return nil
 }
 
@@ -1922,19 +1922,22 @@ func (n *node) ExecPaxosAcceptMessage(msg types.Message, pkt transport.Packet) e
 	Logger.Info().Msgf("[%v] ExecPaxosAcceptMessage id=%v: receive paxos accept message from %v, replayed by %v", n.address, pkt.Header.PacketID, pkt.Header.Source, pkt.Header.RelayedBy)
 
 	n.step.RLock()
+	currentStep := n.step.value
+	n.step.RUnlock()
+
 	n.proposer.Lock()
-	defer n.proposer.Unlock()
-	defer n.step.RUnlock()
 
 	// Ignore messages whose Step field do not match your current logical clock (which starts at 0)
 	proposedStep := paxosAcceptMessage.Step
-	if proposedStep != n.step.value {
-		Logger.Info().Msgf("[%v] step does not match in accept message. step in message=%v, step in peer=%v", n.address, proposedStep, n.step.value)
+	if proposedStep != currentStep {
+		Logger.Info().Msgf("[%v] step does not match in accept message. step in message=%v, step in peer=%v", n.address, proposedStep, currentStep)
+		n.proposer.Unlock()
 		return nil
 	}
 
 	if n.proposer.proposer && n.proposer.phaseOne {
 		Logger.Info().Msgf("[%v] received accept message, however, proposer is not in phase two", n.address)
+		n.proposer.Unlock()
 		return nil
 	}
 
@@ -1950,15 +1953,24 @@ func (n *node) ExecPaxosAcceptMessage(msg types.Message, pkt transport.Packet) e
 	Logger.Info().Msgf("[%v] Phase two. Peer [%v] accepted for iteration=%v", n.address, pkt.Header.Source, uniqueId)
 
 	if len(n.proposer.phaseTwoAcceptedPeers[uniqueId]) >= n.config.PaxosThreshold(n.config.TotalPeers) {
-		n.proposer.consensusValueMap[n.step.value] = copyPaxosValue(paxosAcceptMessage.Value)
+		n.proposer.consensusValueMap[currentStep] = copyPaxosValue(paxosAcceptMessage.Value)
+
+		n.step.Lock()
+		n.step.finished[currentStep] = make(chan bool, 1)
+		n.step.Unlock()
+
 		select {
 		case n.proposer.phaseTwoSuccessChanMap[uniqueId] <- true:
 			Logger.Info().Msgf("[%v] Phase two of iteration=%v succeeded", n.address, uniqueId)
 		default:
-			Logger.Error().Msgf("[%v] Cannot send signal to iteration=%v for phase two", n.address, uniqueId)
+			Logger.Warn().Msgf("[%v] Cannot send signal to iteration=%v for phase two", n.address, uniqueId)
 		}
+
+		n.proposer.Unlock()
+		return n.sendTLC(currentStep)
 	}
 
+	n.proposer.Unlock()
 	return nil
 }
 
@@ -2037,8 +2049,68 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 		// reset paxos acceptor, proposer
 		n.acceptor.resetWithoutLocking()
 		n.proposer.resetWithoutLocking()
+
+		if n.step.finished[n.step.value - 1] != nil {
+			select {
+			case n.step.finished[n.step.value - 1] <- true:
+				Logger.Info().Msgf("[%v] Sending tag result of step=%v", n.address, n.step.value - 1)
+			default:
+				Logger.Warn().Msgf("[%v] Error Sending tag result of step=%v", n.address, n.step.value - 1)
+			}
+		}
 	}
 	return nil
+}
+
+func (n *node) sendTLC(currentStep uint) error {
+	Logger.Info().Msgf("[%v] Consensus reached, now we need to send TLC", n.address)
+
+	n.proposer.RLock()
+	paxosValue := n.proposer.consensusValueMap[currentStep]
+	n.proposer.RUnlock()
+
+	hash := crypto.SHA256.New()
+	var prevHash []byte
+	if currentStep == 0 {
+		prevHash = make([]byte, 32)
+	} else {
+		prevHash = n.config.Storage.GetBlockchainStore().Get(storage.LastBlockKey)
+	}
+	data := [][]byte{
+		[]byte(strconv.Itoa(int(currentStep))),
+		[]byte(paxosValue.UniqID),
+		[]byte(paxosValue.Filename),
+		[]byte(paxosValue.Metahash),
+		prevHash,
+	}
+	for _, d := range data {
+		_, err := hash.Write(d)
+		if err != nil {
+			Logger.Error().Msgf("[%v] Error writing %v to hash", n.address, string(d))
+			return err
+		}
+	}
+
+	message := types.TLCMessage{
+		Step: currentStep,
+		Block: types.BlockchainBlock{
+			Index:    currentStep,
+			Hash:     append([]byte(nil), hash.Sum(nil)...),
+			Value:    copyPaxosValue(paxosValue),
+			PrevHash: prevHash,
+		},
+	}
+	transportMessage, err := n.config.MessageRegistry.MarshalMessage(message)
+	if err != nil {
+		return err
+	}
+
+	Logger.Info().Msgf("[%v] Broadcasting TLC message", n.address)
+	n.step.Lock()
+	n.step.tlcMessagesSent[currentStep] = true
+	n.step.Unlock()
+
+	return n.Broadcast(transportMessage)
 }
 
 func (n *node) catchUpTLCWithoutLocking() error {
