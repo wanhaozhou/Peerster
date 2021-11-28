@@ -311,7 +311,7 @@ func (n *node) SetRoutingEntry(origin, relayAddr string) {
 
 	if len(relayAddr) == 0 {
 		// TODO: potentially lose a neighbour
-		Logger.Error().Msgf("[%v] Losing neighbour", n.address)
+		Logger.Info().Msgf("[%v] Losing neighbour", n.address)
 		delete(n.routingTable.values, origin)
 		return
 	}
@@ -555,7 +555,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 			Logger.Info().Msgf("[%v] Processing packet locally for id=%v", n.address, pkt.Header.PacketID)
 			err := n.config.MessageRegistry.ProcessPacket(pkt)
 			if err != nil {
-				Logger.Error().Msg(err.Error())
+				Logger.Info().Msg(err.Error())
 			}
 		}
 		return nil
@@ -587,7 +587,7 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 		Logger.Info().Msgf("[%v] Processing packet locally for id=%v", n.address, pkt.Header.PacketID)
 		err := n.config.MessageRegistry.ProcessPacket(pkt)
 		if err != nil {
-			Logger.Error().Msg(err.Error())
+			Logger.Info().Msg(err.Error())
 		}
 	}
 
@@ -1534,7 +1534,7 @@ func (n *node) Tag(name string, mh string) error {
 			prevStep = currentStep
 		}
 
-		Logger.Error().Msgf("[%v] Start Paxos. Step=%v, Id=%v", n.address, currentStep, paxosId)
+		Logger.Info().Msgf("[%v] Start Paxos. Step=%v, Id=%v", n.address, currentStep, paxosId)
 
 		n.proposer.Lock()
 		// Make sure that we are in phase one
@@ -1613,14 +1613,14 @@ func (n *node) Tag(name string, mh string) error {
 
 		select {
 		case <- time.After(n.config.PaxosProposerRetry):
-			Logger.Error().Msgf("[%v] Timeout for phase two....", n.address)
+			Logger.Info().Msgf("[%v] Timeout for phase two....", n.address)
 			continue loop
 		case <- phaseTwoSuccessChan:
-			Logger.Error().Msgf("[%v] Phase two succeeds", n.address)
+			Logger.Info().Msgf("[%v] Phase two succeeds", n.address)
 			if isOriginal {
 				break loop
 			} else {
-				Logger.Error().Msgf("[%v] This iteration is not the original value!", n.address)
+				Logger.Info().Msgf("[%v] This iteration is not the original value!", n.address)
 				continue loop
 			}
 		}
@@ -1631,9 +1631,9 @@ func (n *node) Tag(name string, mh string) error {
 	n.step.RUnlock()
 
 	for finishedChan != nil {
-		Logger.Error().Msgf("[%v] Start waiting for result of step=%v, addr=%p", n.address, currentStep, finishedChan)
+		Logger.Info().Msgf("[%v] Start waiting for result of step=%v, addr=%p", n.address, currentStep, finishedChan)
 		if <-finishedChan; true {
-			Logger.Error().Msgf("[%v] Tag finished for step=%v", n.address, currentStep)
+			Logger.Info().Msgf("[%v] Tag finished for step=%v", n.address, currentStep)
 			return nil
 		}
 	}
@@ -1966,16 +1966,16 @@ func (n *node) ExecPaxosAcceptMessage(msg types.Message, pkt transport.Packet) e
 		n.proposer.phaseTwoAcceptedPeers[uniqueId] = make(map[string]struct{})
 	}
 	n.proposer.phaseTwoAcceptedPeers[uniqueId][pkt.Header.Source] = struct{}{}
-	Logger.Error().Msgf("[%v] Phase two accepted for iteration=%v, uniqueId=%v. Peer [%v] accepted.", n.address, currentStep, uniqueId, pkt.Header.Source)
+	Logger.Info().Msgf("[%v] Phase two accepted for iteration=%v, uniqueId=%v. Peer [%v] accepted.", n.address, currentStep, uniqueId, pkt.Header.Source)
 
 	if len(n.proposer.phaseTwoAcceptedPeers[uniqueId]) >= n.config.PaxosThreshold(n.config.TotalPeers) {
 		n.proposer.consensusValueMap[currentStep] = copyPaxosValue(paxosAcceptMessage.Value)
 
 		select {
 		case n.proposer.phaseTwoSuccessChanMap[uniqueId] <- true:
-			Logger.Error().Msgf("[%v] Phase two of iteration=%v, uniqueId=%v, succeeded", n.address, currentStep, uniqueId)
+			Logger.Info().Msgf("[%v] Phase two of iteration=%v, uniqueId=%v, succeeded", n.address, currentStep, uniqueId)
 		default:
-			Logger.Error().Msgf("[%v] Phase two Cannot send signal to iteration=%v, uniqueId=%v, for phase two", n.address, currentStep, uniqueId)
+			Logger.Info().Msgf("[%v] Phase two Cannot send signal to iteration=%v, uniqueId=%v, for phase two", n.address, currentStep, uniqueId)
 		}
 
 		// send TLC below
@@ -2040,7 +2040,7 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 	if !ok {
 		return xerrors.Errorf("Wrong type: %T", msg)
 	}
-	Logger.Error().Msgf("[%v] ExecTLCMessage. id=%v: receive tlc message from %v, replayed by %v", n.address, pkt.Header.PacketID, pkt.Header.Source, pkt.Header.RelayedBy)
+	Logger.Info().Msgf("[%v] ExecTLCMessage. id=%v: receive tlc message from %v, replayed by %v", n.address, pkt.Header.PacketID, pkt.Header.Source, pkt.Header.RelayedBy)
 
 	n.step.Lock()
 	n.acceptor.Lock()
@@ -2065,7 +2065,7 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 		return nil
 	}
 
-	Logger.Error().Msgf("[%v] ExecTLCMessage. TLC message is for current step=%v", n.address, n.step.value)
+	Logger.Info().Msgf("[%v] ExecTLCMessage. TLC message is for current step=%v", n.address, n.step.value)
 	if len(n.step.tlcMessages[tlcMessage.Step]) >= n.config.PaxosThreshold(n.config.TotalPeers) {
 		Logger.Info().Msgf("[%v] ExecTLCMessage. Threshold reached. Proceeding to next step", n.address)
 
@@ -2108,7 +2108,7 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 		if err != nil {
 			return err
 		}
-		Logger.Error().Msgf("[%v] catchUpTLC ended. current step=%v", n.address, n.step.value)
+		Logger.Info().Msgf("[%v] catchUpTLC ended. current step=%v", n.address, n.step.value)
 
 		// reset paxos acceptor, proposer
 		n.acceptor.resetWithoutLocking()
@@ -2117,7 +2117,7 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 		if n.step.finished[n.step.value - 1] != nil {
 			select {
 			case n.step.finished[n.step.value - 1] <- true:
-				Logger.Error().Msgf("[%v] Sent tag result of step=%v to addr=%p", n.address, n.step.value - 1, n.step.finished[n.step.value - 1])
+				Logger.Info().Msgf("[%v] Sent tag result of step=%v to addr=%p", n.address, n.step.value - 1, n.step.finished[n.step.value - 1])
 			default:
 				Logger.Warn().Msgf("[%v] Error Sending tag result of step=%v", n.address, n.step.value - 1)
 			}
