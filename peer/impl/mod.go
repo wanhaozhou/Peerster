@@ -2114,57 +2114,6 @@ func (n *node) ExecTLCMessage(msg types.Message, pkt transport.Packet) error {
 	return nil
 }
 
-func (n *node) sendTLC(currentStep uint) error {
-	Logger.Info().Msgf("[%v] Consensus reached, now we need to send TLC", n.address)
-
-	n.proposer.RLock()
-	paxosValue := n.proposer.consensusValueMap[currentStep]
-	n.proposer.RUnlock()
-
-	hash := crypto.SHA256.New()
-	var prevHash []byte
-	if currentStep == 0 {
-		prevHash = make([]byte, 32)
-	} else {
-		prevHash = n.config.Storage.GetBlockchainStore().Get(storage.LastBlockKey)
-	}
-	data := [][]byte{
-		[]byte(strconv.Itoa(int(currentStep))),
-		[]byte(paxosValue.UniqID),
-		[]byte(paxosValue.Filename),
-		[]byte(paxosValue.Metahash),
-		prevHash,
-	}
-	for _, d := range data {
-		_, err := hash.Write(d)
-		if err != nil {
-			Logger.Error().Msgf("[%v] Error writing %v to hash", n.address, string(d))
-			return err
-		}
-	}
-
-	message := types.TLCMessage{
-		Step: currentStep,
-		Block: types.BlockchainBlock{
-			Index:    currentStep,
-			Hash:     append([]byte(nil), hash.Sum(nil)...),
-			Value:    copyPaxosValue(paxosValue),
-			PrevHash: prevHash,
-		},
-	}
-	transportMessage, err := n.config.MessageRegistry.MarshalMessage(message)
-	if err != nil {
-		return err
-	}
-
-	Logger.Info().Msgf("[%v] Broadcasting TLC message", n.address)
-	n.step.Lock()
-	n.step.tlcMessagesSent[currentStep] = true
-	n.step.Unlock()
-
-	return n.Broadcast(transportMessage)
-}
-
 func (n *node) catchUpTLCWithoutLocking() error {
 	Logger.Info().Msgf("[%v] catchUpTLC. Try to catch up for step=%v", n.address, n.step.value)
 	if len(n.step.tlcMessages[n.step.value]) >= n.config.PaxosThreshold(n.config.TotalPeers) {
