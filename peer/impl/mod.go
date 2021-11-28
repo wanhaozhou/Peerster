@@ -546,6 +546,18 @@ func (n *node) broadCast(msg transport.Message, neighbour string, ack bool, proc
 	if len(neighbour) <= 0 {
 		// we cannot find another neighbour to send the rumor
 		// simply abort the action
+		if process {
+			header := transport.NewHeader(n.address, n.address, n.address, 0)
+			pkt := transport.Packet{
+				Header: &header,
+				Msg: &msg,
+			}
+			Logger.Info().Msgf("[%v] Processing packet locally for id=%v", n.address, pkt.Header.PacketID)
+			err := n.config.MessageRegistry.ProcessPacket(pkt)
+			if err != nil {
+				Logger.Error().Msg(err.Error())
+			}
+		}
 		return nil
 	}
 
