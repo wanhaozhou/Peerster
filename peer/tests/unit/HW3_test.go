@@ -625,7 +625,7 @@ func Test_HW3_Paxos_Proposer_Prepare_Propose_Correct(t *testing.T) {
 	go func() {
 		// to fill the GetIns() array
 		for {
-			acceptor.Recv(0)
+			acceptor.Recv(1 * time.Millisecond)
 		}
 	}()
 
