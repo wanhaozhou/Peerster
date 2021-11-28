@@ -1620,8 +1620,7 @@ func (n *node) Tag(name string, mh string) error {
 
 	for finishedChan != nil {
 		Logger.Error().Msgf("[%v] Start waiting for result of step=%v, addr=%p", n.address, currentStep, finishedChan)
-		select {
-		case <- finishedChan:
+		if <-finishedChan; true {
 			Logger.Error().Msgf("[%v] Tag finished for step=%v", n.address, currentStep)
 			return nil
 		}
@@ -1960,18 +1959,13 @@ func (n *node) ExecPaxosAcceptMessage(msg types.Message, pkt transport.Packet) e
 	if len(n.proposer.phaseTwoAcceptedPeers[uniqueId]) >= n.config.PaxosThreshold(n.config.TotalPeers) {
 		n.proposer.consensusValueMap[currentStep] = copyPaxosValue(paxosAcceptMessage.Value)
 
-		// check if this is the propose message that I made
-		//if paxosAcceptMessage.ID % n.config.TotalPeers == n.config.PaxosID {
-		//	Logger.Error().Msgf("[%v] Yes! Phase two of iteration=%v, uniqueId=%v. paxosId=%v, myId=%v", n.address, currentStep, uniqueId, paxosAcceptMessage.ID, n.config.PaxosID)
-			select {
-			case n.proposer.phaseTwoSuccessChanMap[uniqueId] <- true:
-				Logger.Error().Msgf("[%v] Phase two of iteration=%v, uniqueId=%v, succeeded", n.address, currentStep, uniqueId)
-			default:
-				Logger.Error().Msgf("[%v] Phase two Cannot send signal to iteration=%v, uniqueId=%v, for phase two", n.address, currentStep, uniqueId)
-			}
-		//}
+		select {
+		case n.proposer.phaseTwoSuccessChanMap[uniqueId] <- true:
+			Logger.Error().Msgf("[%v] Phase two of iteration=%v, uniqueId=%v, succeeded", n.address, currentStep, uniqueId)
+		default:
+			Logger.Error().Msgf("[%v] Phase two Cannot send signal to iteration=%v, uniqueId=%v, for phase two", n.address, currentStep, uniqueId)
+		}
 
-		// copied from function
 		// send TLC below
 		Logger.Info().Msgf("[%v] Consensus reached, now we need to send TLC", n.address)
 		paxosValue := n.proposer.consensusValueMap[currentStep]
